@@ -9,9 +9,11 @@ import TopToolbar from './ui/components/TopToolbar.vue'
 import ProjectPanel from './ui/components/ProjectPanel.vue'
 import StatusBar from './ui/components/StatusBar.vue'
 import ToastHost from './ui/components/ToastHost.vue'
+import ImageImportDialog from './ui/components/ImageImportDialog.vue'
 
 const canvasHost = ref<HTMLElement>()
 const fps = ref(0)
+const imageDialogOpen = ref(false)
 
 let renderer: PixiRenderer | null = null
 let interaction: InteractionController | null = null
@@ -105,17 +107,22 @@ function onGenerate(count: number): void {
   const points = generatePoints({ count })
   loadPointsAsProject(points, `${count} 点测试项目`)
 }
+
+function onImportImage(): void {
+  imageDialogOpen.value = true
+}
 </script>
 
 <template>
   <div class="app">
-    <TopToolbar @fit="onFit" @generate="onGenerate" />
+    <TopToolbar @fit="onFit" @generate="onGenerate" @import-image="onImportImage" />
     <div class="body">
       <ProjectPanel />
       <main ref="canvasHost" class="canvas-host" />
     </div>
     <StatusBar :fps="fps" />
     <ToastHost />
+    <ImageImportDialog v-model:open="imageDialogOpen" />
   </div>
 </template>
 

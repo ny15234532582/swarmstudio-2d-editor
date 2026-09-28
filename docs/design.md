@@ -18,17 +18,18 @@
 │  DataService (data/service.ts)  ← 缓冲 + 防抖                       │
 │      │                                                             │
 │  DataClient ── TaskQueue（串行 / 合并 / 错误传播）                  │
-└───────────────────────────────┬───────────────────────────────────┘
-                                │ postMessage（结构化克隆）
-┌───────────────────────────────▼───────────────────────────────────┐
-│  Worker (data/worker.ts)                                          │
-│    顺序执行队列 → Repository（SQL）→ SQLite(WASM)                  │
-│         └── opfs-sahpool VFS ── OPFS 上的 /swarmstudio.sqlite3     │
-└───────────────────────────────────────────────────────────────────┘
+└───────────────┬────────────────────────────────┬──────────────────┘
+                │ postMessage（结构化克隆）        │ 一次性 transfer 像素
+┌───────────────▼──────────────────┐  ┌──────────▼──────────────────┐
+│ 数据 Worker (data/worker.ts)      │  │ 计算 Worker (compute/)      │
+│  顺序队列 → Repository(SQL)       │  │  灰度/二值化/抽稀 → Point[] │
+│   → SQLite(WASM) → opfs-sahpool   │  └─────────────────────────────┘
+│   → OPFS /swarmstudio.sqlite3     │
+└───────────────────────────────────┘
 ```
 
-分层原则：`core`（领域）← `state`（运行时）← `data`（持久化，不依赖 Vue）← `ui`。
-`data` 只单向依赖 `core` 与 `state` 的类型，UI 与存储之间没有直接调用。
+分层原则：`core`（领域）← `state`（运行时）← `data`/`compute`（不依赖 Vue）← `ui`。
+`data`、`compute` 只单向依赖 `core`（与 `state` 的类型），UI 与 Worker 之间没有直接调用。
 
 ## 3. 数据模型与事实源（对应 6.1）
 
@@ -78,6 +79,7 @@
 | 视口交互 | `render/viewport.ts` + `render/interaction.ts` | 平移缩放、命中、拖动、框选 |
 | 存储 | `data/*` | SQLite + OPFS + Worker + 队列 |
 | JSON 导入导出 | `data/json.ts` | 校验后导入 / 导出下载 |
+| 图片→点阵 | `compute/*` | 解码、二值化、抽稀，独立 compute worker |
 | Vue 页面与 UI | `ui/*` | 展示与命令转发 |
 
 ## 5. 数据流：一次「拖动点并保存」（对应 6.3）
@@ -186,14 +188,45 @@ PixiJS v8 是官方支持 Worker 渲染的（`DOMAdapter.set(WebWorkerAdapter)`�
 - **实例化网格**：十万级点位改用 instanced mesh，把顶点属性压到最少。
 - **纹理图集**：若未来点有多种外观（图标/形状），合并到一张图集避免断批。
 
-## 8. 存储设计（SQLite + OPFS + Worker + 队列）
+## 8. 图片导入 → 二值化 → 生成点位（compute worker）
 
-### 8.1 为什么 SQLite 而不是直接读写 OPFS 文件
+对应题目选做项「图片导入」「图片二值化并生成点位」「使用 Worker 处理数据」。
+
+### 8.1 流程
+
+```
+选择图片
+  → 主线程：createImageBitmap 解码，缩到最长边 ≤1600（控制内存 + 超采样）
+  → getImageData 取像素，一次性 transfer 给 compute worker
+  → Worker：灰度化(luma) → 阈值二值化(可反相, 丢弃透明像素)
+            → 按目标点数算网格步长抽稀 → 映射为居中缩放的 Point[]
+  → 主线程：预览图实时回显；确认后走既有 loadPointsAsProject 落 SQLite
+```
+
+### 8.2 为什么单独开 compute worker
+
+- 一张图动辄几百萬像素，灰度化 + 阈值 + 采样是纯 CPU 循环，放主线程会卡住 UI；
+- 与存储 Worker 分离，图片运算不占 SQLite 的事务时间；
+- 像素只在载入时传一次，之后调参只回传小预览，避免反复搬运大图。
+
+### 8.3 关键设计点
+
+- **抽稀**：`step = round(sqrt(保留像素数 / 目标点数))`，让生成点数可控在几千到几万；
+- **坐标映射**：以图片中心为原点，按目标世界宽度等比缩放，`z = 0`；
+- **颜色**：可选原图颜色（保留素材观感）或统一主题色；
+- **纯函数核心**：`src/compute/imageProcessor.ts` 不依赖 DOM/Worker，
+  因此二值化、抽稀、坐标映射都能在 Node 下单测（8 个用例）。
+- **踩坑记录**：Vue 的 `reactive` 代理（含嵌套 `fixedColor`）无法被 `postMessage`
+  结构化克隆，直接传会抛 `DataCloneError`——必须先在主线程拍成纯对象再发。
+
+## 9. 存储设计（SQLite + OPFS + Worker + 队列）
+
+### 9.1 为什么 SQLite 而不是直接读写 OPFS 文件
 
 直接用 OPFS 文件 API 时，每次保存要么整文件重写、要么自己实现增量编码；
 用 SQL 封装后，项目列表是一条查询、点位是行、历史是表，增删改查与事务都由数据库保证。
 
-### 8.2 表结构
+### 9.2 表结构
 
 ```sql
 PRAGMA foreign_keys = ON;
@@ -208,26 +241,26 @@ history(project_id, seq, label, op, created_at,
 
 `op` 列存 Operation 的 JSON；`version` 与 `user_version` 分别管数据格式与结构。
 
-### 8.3 VFS 选择
+### 9.3 VFS 选择
 
 使用 `opfs-sahpool`：无需 COOP/COEP、批量性能好、可静态托管；
 代价是不支持多标签并发写（单用户编辑器可接受）。初始化失败时自动降级为内存库
 并在状态栏提示，保证应用仍可用。
 
-### 8.4 任务队列（主线程）
+### 9.4 任务队列（主线程）
 
 `data/queue.ts` 的 `TaskQueue`：concurrency=1 保证串行；相同 `key` 的待执行任务
 通过 `merge` 合并——所以「连续拖动 / 连续改色」在 400ms 窗口内只会合并成一次写库。
 Worker 内还有一层顺序执行循环，确保请求按到达顺序进入事务。
 
-### 8.5 写入时机
+### 9.5 写入时机
 
 - 新增 / 删除 / 移动 / 改色：提交后防抖 400ms 增量写（`applyChanges`）。
 - 载入测试数据 / 导入：`replacePoints` 全量替换（事务）。
 - 拖动过程不写（见第 5 节）。
 - 每批写入与历史覆盖在同一事务内，避免写一半。
 
-## 9. 性能与可扩展性（对应 6.4）
+## 10. 性能与可扩展性（对应 6.4）
 
 - **移动一个点是否重绘全部**：不。只改该点（及选中集合）的 Sprite 属性，配合空间网格命中。
 - **批量改色如何减少重复计算**：一次构造 id 列表 → 一次 `setColors` → 一次 tint 更新 →
@@ -242,33 +275,37 @@ Worker 内还有一层顺序执行循环，确保请求按到达顺序进入事�
 - **大量操作记录如何合并压缩**：Operation 本身只存增量；队列按 key 合并同批写入；
   历史栈与表都限长 100；未来可对 move 做「同一 id 多次移动只保留首尾」。
 
-## 10. 测试与验证
+## 11. 测试与验证
 
-- 单元测试（`pnpm test`，26 例）：仓储层在 Node 内存 SQLite 上真实执行 SQL，
-  覆盖迁移、增量写入、历史裁剪、级联删除；队列覆盖串行 / 合并 / 错误隔离。
-- 端到端（`pnpm smoke`）：无头 Chrome 验证 OPFS(opfs-sahpool) 落盘、
-  20,000 点加载、编辑、自动保存、刷新后从 SQLite 重新打开、撤销历史恢复。
-- 性能观测：界面实时 FPS；无头软件渲染下 20,000 点约 28 FPS、8,000 点约 50 FPS，
-  真机 GPU 下更高。
+- 单元测试（`pnpm test`，34 例）：仓储层在 Node 内存 SQLite 上真实执行 SQL，
+  覆盖迁移、增量写入、历史裁剪、级联删除；队列覆盖串行 / 合并 / 错误隔离；
+  `imageProcessor` 覆盖二值化、反相、透明像素、抽稀步长与坐标映射。
+- 端到端：
+  - `pnpm smoke`：无头 Chrome 验证 OPFS(opfs-sahpool) 落盘、20,000 点加载、编辑、
+    自动保存、刷新后从 SQLite 重新打开、撤销历史恢复。
+  - `pnpm smoke:image`：注入一张图片 → 二值化预览 → 生成点位 → 作为新项目落库。
+- 性能观测：界面实时 FPS；无头软件渲染下 20,000 点约 60 FPS
+  （关闭 MSAA 前约 28 FPS），真机 GPU 下更高。
 
-## 11. 技术学习记录（对应第 7 节）
+## 12. 技术学习记录（对应第 7 节）
 
 - 阅读资料：SQLite WASM 官方文档《Persistent Storage Options》与 `@sqlite.org/sqlite-wasm`
-  仓库 README；PixiJS v8 `Application` / `Graphics` / `generateTexture` 文档。
-- 首次使用的 API：`navigator.storage.getDirectory` 之外的 OPFS 同步访问句柄路径、
-  `installOpfsSAHPoolVfs`、`OpfsSAHPoolDb`、SQLite OO1 的 `prepare/step/transaction`、
-  Pixi `renderer.generateTexture` 与 `Application.init({ preference })`。
+  仓库 README；PixiJS v8 的 `Application` / `Sprite` / `Environments` / `Performance Tips` 文档。
+- 首次使用的 API：`installOpfsSAHPoolVfs`、`OpfsSAHPoolDb`、SQLite OO1 的
+  `prepare/step/transaction/selectArrays`、`Application.init({ preference, powerPreference })`、
+  `renderer.resize(w,h,resolution)` 动态分辨率、`createImageBitmap` + 离屏 canvas 取像素。
 - 遇到的问题：
-  - OPFS `opfs` VFS 需要 COOP/COEP 与 SharedArrayBuffer，静态托管不便 →
-    改用 `opfs-sahpool`。
+  - OPFS `opfs` VFS 需要 COOP/COEP 与 SharedArrayBuffer，静态托管不便 → 改用 `opfs-sahpool`。
   - Vite 会把 wasm 的 `new URL(..., import.meta.url)` 处理错 → `optimizeDeps.exclude`
     并让 Vite 直接处理资源，构建产物正确输出 `sqlite3-*.wasm`。
   - 拖动结束只登记历史、不发 mutation，导致移动未落库 → 在 `commitMove` 显式广播 mutation。
   - 打开项目时 `history.load` 会触发 dirty → 用 `suppress` 标志避免误标脏。
+  - Vue 的 `reactive` 代理无法 `postMessage` 克隆（`DataCloneError`）→ 发送前先拍成纯对象。
+  - 关闭 MSAA 后点变粗糙 → 改用 2D canvas 径向渐变生成纹理，兼顾画质与性能。
 - 仍未解决：多标签并发写、Redo 持久化、逐行 UPDATE 的批量优化。
 
-## 12. 取舍与后续
+## 13. 取舍与后续
 
 - 选择 SQLite 换取了结构化与事务能力，代价是引入约 870KB（gzip ~400KB）的 wasm。
 - 选择 `opfs-sahpool` 换取了免 COOP/COEP 与性能，代价是放弃多标签并发。
-- 后续可扩展：分组 / 锁定、图片导入与二值化、点位列式传输、历史压缩策略。
+- 后续可扩展：分组 / 锁定、图片抖动(halftone)提升观感、点位列式传输、历史压缩策略。

@@ -22,10 +22,11 @@ pnpm build          # 类型检查 + 生产构建
 pnpm preview        # 预览构建产物
 pnpm test           # 单元测试（vitest）
 pnpm gen            # 生成 20,000 点测试数据 -> data/test-20000.json
-pnpm smoke          # 无头浏览器端到端冒烟（需要本地 Chrome）
+pnpm smoke          # 无头浏览器端到端冒烟（编辑器，需要本地 Chrome）
+pnpm smoke:image    # 无头浏览器端到端冒烟（图片生成点位）
 ```
 
-> `pnpm smoke` 依赖本机 Chrome，可用 `CHROME_PATH=/path/to/chrome pnpm smoke` 指定。
+> 冒烟脚本依赖本机 Chrome，可用 `CHROME_PATH=/path/to/chrome pnpm smoke` 指定。
 
 ## 技术选型
 
@@ -39,6 +40,8 @@ pnpm smoke          # 无头浏览器端到端冒烟（需要本地 Chrome）
   - 代价：不支持多标签同时写（单用户编辑器可接受）。
 - **Web Worker + 任务队列**：OPFS 的同步访问句柄与 SQLite(WASM) 都只在 Worker 可用；
   队列负责串行化、合并（连续保存合并为一次写入）与错误传播。
+- **独立 compute worker**：图片解码后的像素运算（灰度、二值化、抽稀）单独一个 Worker，
+  与存储 Worker 隔离，避免大图计算卡住主线程或占用数据库事务时间。
 
 ## 目录结构
 
@@ -56,8 +59,12 @@ src/
     client.ts     DataClient：类型化 API + 请求调度
     service.ts    门面：项目 CRUD、自动保存、导入导出
     json.ts       JSON 导入导出
+  compute/       图片 → 点阵（纯计算 + 独立 compute worker）
+    imageProcessor.ts  二值化 / 抽稀 / 坐标映射（纯函数，可 Node 单测）
+    worker.ts          像素运算 Worker
+    client.ts          解码图片 + 调用 Worker
   ui/            Vue 组件与状态桥接
-scripts/         测试数据生成、无头冒烟
+scripts/         测试数据生成、无头冒烟（编辑器 / 图片管线）
 tests/           vitest 单元测试
 docs/design.md   设计说明
 ```
@@ -95,6 +102,8 @@ interface Point { id: string; x: number; y: number; z: number; r: number; g: num
 - 渲染质量：自动（按 FPS 动态分辨率）/ 高 / 均衡 / 流畅
 - Undo / Redo：新增 / 删除 / 移动 / 改色，快捷键 `Cmd/Ctrl+Z`、`Shift+Cmd/Ctrl+Z`
 - 项目存储：创建、保存、打开、删除、刷新恢复、导出 / 导入 JSON
+- 图片生成点位：导入图片 → 阈值二值化（可反相）→ 按目标点数抽稀 → 生成点阵，
+  全程在独立 compute worker，参数实时预览
 - 自动保存：提交后 400ms 防抖；拖动期间的 `pointermove` 不触发持久化
 
 ## 快捷键与操作
@@ -115,6 +124,10 @@ interface Point { id: string; x: number; y: number; z: number; r: number; g: num
 
 （20,000 点数据；左下角显示总点数、FPS、实际渲染分辨率、存储后端 `opfs-sahpool`。）
 
+![图片生成点位](docs/screenshots/image-import.png)
+
+（导入图片 → 二值化实时预览 → 生成点位。）
+
 ## 测试与性能验证
 
 ### 性能验证环境
@@ -127,13 +140,15 @@ interface Point { id: string; x: number; y: number; z: number; r: number; g: num
 | Node / pnpm | v24.8.0 / 10.18.2 |
 | 数据 | 20,000 点（`pnpm gen` 生成，确定性种子可复现） |
 
-- `pnpm test`：26 个用例
+- `pnpm test`：34 个用例
   - `repository`：在 Node 内存库上验证建表、迁移、增量写入、历史裁剪(100)、级联删除
   - `queue`：任务串行、同 key 合并、错误隔离
   - `history` / `operations`：撤销重做的前后状态
+  - `imageProcessor`：二值化、反相、透明像素、抽稀步长、坐标映射
   - `validation` / `spatial`：数据校验与空间索引
 - `pnpm smoke`：无头 Chrome 端到端——创建项目 → 生成 20,000 点 → 编辑 → 自动保存 →
   刷新 → 从 SQLite 重新打开 → **撤销历史仍可用**。
+- `pnpm smoke:image`：注入一张图片 → 二值化预览 → 生成点位 → 作为新项目落库。
 - 性能：界面右下角实时显示 FPS 与实际渲染分辨率。工具栏提供画质档位
   （自动/高/均衡/流畅），`自动` 会按 FPS 动态升降分辨率。
   上述无头软件渲染环境下，20,000 点关闭 MSAA 后实测约 60 FPS
@@ -149,7 +164,7 @@ interface Point { id: string; x: number; y: number; z: number; r: number; g: num
 - `opfs-sahpool` 不支持多标签并发写；同源多开时后开的标签会初始化失败并降级为内存模式。
 - 历史仅持久化 Undo 栈（最近 100 条），Redo 栈不持久化。
 - 增量写入目前对移动 / 改色逐行 `UPDATE`，尚未做语句级批量优化。
-- 未实现题目选做项：图片导入 / 二值化、分组锁定；点数到十万级需进一步优化（见设计说明第 9 节）。
+- 未实现题目选做项：分组锁定；图片抖动手法（halftone）尚未加入；点数到十万级需进一步优化（见设计说明第 10 节）。
 
 ## AI 使用说明
 

@@ -17,6 +17,7 @@ import { toast } from '../toast'
 const emit = defineEmits<{
   (e: 'fit'): void
   (e: 'generate', count: number): void
+  (e: 'import-image'): void
 }>()
 
 const color = ref('#4ea1ff')
@@ -81,6 +82,7 @@ function applyColor(): void {
         <option value="fast">流畅</option>
       </select>
       <button @click="emit('generate', 20000)">生成 20,000 点测试数据</button>
+      <button @click="emit('import-image')">导入图片生成点位</button>
     </div>
   </header>
 </template>
