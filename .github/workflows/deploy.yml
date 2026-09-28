@@ -32,7 +32,21 @@ jobs:
           cache: pnpm
 
       - run: pnpm install --frozen-lockfile
-      - run: pnpm test
+
+      - name: Test
+        run: |
+          set +e
+          pnpm test > /tmp/test.log 2>&1
+          code=$?
+          if [ $code -ne 0 ]; then
+            echo "pnpm test 退出码 $code"
+            # 把失败输出打成 annotation，便于在公开的 check-runs API 里查看
+            tail -c 4000 /tmp/test.log | while IFS= read -r line; do
+              echo "::error::$line"
+            done
+            exit $code
+          fi
+          tail -5 /tmp/test.log
       - name: Build
         run: pnpm build
         env:
