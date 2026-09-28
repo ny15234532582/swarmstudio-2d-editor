@@ -40,6 +40,9 @@ jobs:
           BASE_PATH: /${{ github.event.repository.name }}/
 
       - uses: actions/configure-pages@v5
+        with:
+          # 首次运行时自动开启 Pages（需要 pages: write 权限）
+          enablement: true
       - uses: actions/upload-pages-artifact@v3
         with:
           path: dist
