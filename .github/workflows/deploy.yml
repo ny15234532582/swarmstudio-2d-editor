@@ -1,7 +1,10 @@
 name: Deploy to GitHub Pages
 
 # 构建 dist 并发布到 GitHub Pages。
-# 前提：仓库 Settings -> Pages -> Source 选择 "GitHub Actions"。
+#
+# 一次性前置操作（GitHub 限制，GITHUB_TOKEN 无权首次创建 Pages 站点）：
+#   仓库 Settings -> Pages -> Source 选择 "GitHub Actions"
+# 之后每次 push main 都会自动构建并发布。
 on:
   push:
     branches: [main]
@@ -32,22 +35,7 @@ jobs:
           cache: pnpm
 
       - run: pnpm install --frozen-lockfile
-
-      - name: Test
-        run: |
-          set +e
-          pnpm test > /tmp/test.log 2>&1
-          code=$?
-          if [ $code -ne 0 ]; then
-            echo "pnpm test 退出码 $code"
-            # 把失败输出打成 annotation，便于在公开的 check-runs API 里查看
-            grep -n -iE "error|cannot|failed|fail |ENOENT|wasm|sqlite|cannot find" /tmp/test.log \
-              | head -12 | while IFS= read -r line; do
-              echo "::error::$line"
-            done
-            exit $code
-          fi
-          tail -5 /tmp/test.log
+      - run: pnpm test
       - name: Build
         run: pnpm build
         env:
@@ -55,9 +43,6 @@ jobs:
           BASE_PATH: /${{ github.event.repository.name }}/
 
       - uses: actions/configure-pages@v5
-        with:
-          # 首次运行时自动开启 Pages（需要 pages: write 权限）
-          enablement: true
       - uses: actions/upload-pages-artifact@v3
         with:
           path: dist
