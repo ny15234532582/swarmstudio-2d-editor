@@ -114,7 +114,7 @@ src/
     worker.ts          像素运算 Worker
     client.ts          解码图片 + 调用 Worker
   ui/            Vue 组件与状态桥接
-scripts/         测试数据生成 + 4 个无头冒烟（编辑器 / 图片 / 选择 / 分组）
+scripts/         测试数据生成 + 4 个无头冒烟（编辑器 / 图片 / 选择 / 分组）+ 文档转换
 tests/           vitest 单元测试
 docs/design.md   设计说明
 ```
@@ -257,4 +257,8 @@ Operation 契约、任务队列、SQLite 表结构与迁移、渲染方案）均
 
 ## 设计说明
 
-详见 [`docs/design.md`](docs/design.md)。
+- **Markdown（源）**：[`docs/design.md`](docs/design.md)
+- **Word（交付）**：[`docs/design.docx`](docs/design.docx)
+
+Word 版由 `bash scripts/md-to-docx.sh` 从 Markdown 生成（`marked` + LibreOffice，
+不需要额外安装依赖），二者内容一致。
