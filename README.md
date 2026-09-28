@@ -44,6 +44,51 @@ pnpm smoke:select   # 无头浏览器端到端冒烟（Shift 加选 / 套索圈�
 - **独立 compute worker**：图片解码后的像素运算（灰度、二值化、抽稀）单独一个 Worker，
   与存储 Worker 隔离，避免大图计算卡住主线程或占用数据库事务时间。
 
+## 架构与通信
+
+### 分层
+
+| 目录 | 角色 | 依赖 |
+| --- | --- | --- |
+| `core/` | 领域内核：类型、`Operation` 契约、校验、几何/空间索引、ID | 无 |
+| `state/` | 内存事实源：`EditorStore` + `HistoryManager` + 事件总线 | `core` |
+| `render/` | 显示层：PixiJS 渲染、视口变换、指针交互 | `core`、`state` |
+| `data/` | 持久化层：Worker + 任务队列 + SQL + 迁移 | `core` |
+| `compute/` | 计算层：图片→点阵（独立 Worker） | `core` |
+| `ui/` | 页面层：Vue 组件、状态桥接、命令转发 | 以上全部 |
+
+依赖方向单一：`ui → render/data/compute/state → core`，反向依赖为零。
+
+### 两条通信通道
+
+`EditorStore` 广播两类事件，走两条完全不同的通道：
+
+| | 通道① 渲染 | 通道② 持久化 |
+| --- | --- | --- |
+| 事件 | `points:add/remove/move/color`、`selection:change` | `mutation`、`history:change` |
+| 触发 | 任何数据变化（含拖动预览） | 仅**已提交**的操作（含 Undo/Redo） |
+| 处理 | 渲染层订阅后**直接调 Pixi API** 改 Sprite | 进队列 → Worker → SQL |
+| 跨线程 | 否（同线程同步） | 是（`postMessage` 结构化克隆） |
+| 落盘 | 否 | 是 |
+
+### 两层任务队列
+
+```
+EditorStore ──mutation──▶ DataService（缓冲 + 400ms 防抖）
+                              │
+                              ▼
+             主线程 TaskQueue（串行 + 同 key 合并 + 错误传播）
+                              │  postMessage（只传纯数据）
+                              ▼
+             Worker incoming 顺序队列（while 循环取出）
+                              ▼
+             Repository → db.transaction() → SQLite(WASM) → OPFS
+```
+
+- **主线程队列**管调度：连续保存/改色合并成一次写；
+- **Worker 队列**管顺序：保证单连接上不出现交叉事务；
+- 渲染事件**不进队列**，由 Pixi 直接改对象、ticker 绘制。
+
 ## 目录结构
 
 ```
