@@ -124,8 +124,8 @@ async function confirm(): Promise<void> {
   try {
     const points = await client.generate(snapshotParams())
     const name = `图片点位 · ${imageInfo.value.name}`.slice(0, 60)
-    await loadPointsAsProject(points, name)
-    close()
+    // 若用户在有未保存修改时放弃，则不关闭弹窗
+    if (await loadPointsAsProject(points, name)) close()
   } catch (err) {
     toast((err as Error).message, 'error', 5000)
   } finally {

@@ -45,7 +45,21 @@ export async function refreshProjects(): Promise<void> {
   await service.refreshProjects()
 }
 
+/**
+ * 切换/覆盖当前项目前的保护：有未保存修改时先询问是否保存。
+ * 返回 false 表示用户放弃本次操作（保留当前编辑内容）。
+ */
+async function ensureSaved(): Promise<boolean> {
+  if (!dirty.value) return true
+  if (window.confirm('当前项目有未保存的修改，是否先保存？')) {
+    await saveProject()
+    return !dirty.value // 保存流程被取消（如没填项目名）则中止
+  }
+  return window.confirm('不保存并继续？未保存的修改将丢失')
+}
+
 export async function createNewProject(name: string): Promise<void> {
+  if (!(await ensureSaved())) return
   loading.value = true
   try {
     await service.createProject(name)
@@ -58,7 +72,7 @@ export async function createNewProject(name: string): Promise<void> {
 export const openingId = ref<string | null>(null)
 
 export async function openProject(id: string): Promise<void> {
-  if (dirty.value && !window.confirm('当前项目有未保存的修改，确定要打开其它项目吗？')) return
+  if (!(await ensureSaved())) return
   openingId.value = id
   try {
     await service.openProject(id)
@@ -87,13 +101,17 @@ export function exportCurrent(): void {
 }
 
 export async function importFromFile(file: File): Promise<void> {
+  if (!(await ensureSaved())) return
   await service.importFile(file)
 }
 
-export async function loadPointsAsProject(points: Point[], name: string): Promise<void> {
+/** 载入一批点作为新项目。返回是否已应用（供调用方决定是否关闭弹窗）。 */
+export async function loadPointsAsProject(points: Point[], name: string): Promise<boolean> {
+  if (!(await ensureSaved())) return false
   loading.value = true
   try {
     await service.loadPointsAsProject(points, name)
+    return true
   } finally {
     loading.value = false
   }

@@ -107,6 +107,7 @@ interface Point { id: string; x: number; y: number; z: number; r: number; g: num
 - 图片生成点位：导入图片 → 阈值二值化（可反相）→ 按目标点数抽稀 → 生成点阵，
   全程在独立 compute worker，参数实时预览
 - 自动保存：提交后 400ms 防抖；拖动期间的 `pointermove` 不触发持久化
+- 未保存保护：新建 / 打开 / 导入 / 生成点位前，若有未保存修改会先询问是否保存
 
 ## 快捷键与操作
 
