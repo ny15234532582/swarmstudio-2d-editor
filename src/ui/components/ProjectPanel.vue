@@ -9,6 +9,7 @@ import {
   importFromFile,
   loading,
   openProject,
+  openingId,
   opfsSupported,
   projects,
   saveProject,
@@ -72,15 +73,16 @@ function formatTime(ts: number): string {
     <div class="section grow">
       <div class="section-title">
         OPFS 项目列表
-        <span class="count">{{ projects.length }}</span>
+        <span class="count">{{ loading ? '⟳' : projects.length }}</span>
       </div>
-      <div v-if="loading" class="empty">读取中…</div>
-      <div v-else-if="projects.length === 0" class="empty">暂无已保存项目</div>
+      <div v-if="projects.length === 0" class="empty">
+        {{ loading ? '读取中…' : '暂无已保存项目' }}
+      </div>
       <ul v-else class="list">
         <li
           v-for="p in projects"
           :key="p.id"
-          :class="{ active: p.id === currentProjectId }"
+          :class="{ active: p.id === currentProjectId, opening: p.id === openingId }"
         >
           <div class="meta" @click="openProject(p.id)">
             <div class="p-name">{{ p.name }}</div>
@@ -192,6 +194,10 @@ function formatTime(ts: number): string {
 .list li.active {
   background: #12303f;
   border: 1px solid var(--accent);
+}
+.list li.opening .p-name::after {
+  content: ' ⟳';
+  color: var(--accent);
 }
 .meta {
   flex: 1;

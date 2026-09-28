@@ -54,13 +54,16 @@ export async function createNewProject(name: string): Promise<void> {
   }
 }
 
+/** 正在打开的项目 id，用于在列表项上显示忙碌态（不整体隐藏列表） */
+export const openingId = ref<string | null>(null)
+
 export async function openProject(id: string): Promise<void> {
   if (dirty.value && !window.confirm('当前项目有未保存的修改，确定要打开其它项目吗？')) return
-  loading.value = true
+  openingId.value = id
   try {
     await service.openProject(id)
   } finally {
-    loading.value = false
+    openingId.value = null
   }
 }
 
