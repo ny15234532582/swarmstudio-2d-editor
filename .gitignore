@@ -1,6 +1,7 @@
 node_modules/
 dist/
-data/
+# 只忽略仓库根目录下的测试数据输出，别误伤 src/data/
+/data/
 coverage/
 *.log
 .DS_Store
