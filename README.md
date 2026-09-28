@@ -20,6 +20,7 @@ pnpm install
 pnpm dev            # 开发，默认 http://localhost:5173
 pnpm build          # 类型检查 + 生产构建
 pnpm preview        # 预览构建产物
+pnpm typecheck      # 仅类型检查（vue-tsc）
 pnpm test           # 单元测试（vitest）
 pnpm gen            # 生成 20,000 点测试数据 -> data/test-20000.json
 pnpm smoke          # 无头浏览器端到端冒烟（编辑器，需要本地 Chrome）
@@ -54,7 +55,7 @@ pnpm smoke:groups   # 无头浏览器端到端冒烟（成组 / 锁定 / 刷新�
 | `core/` | 领域内核：类型、`Operation` 契约、校验、几何/空间索引、ID | 无 |
 | `state/` | 内存事实源：`EditorStore` + `HistoryManager` + 事件总线 | `core` |
 | `render/` | 显示层：PixiJS 渲染、视口变换、指针交互 | `core`、`state` |
-| `data/` | 持久化层：Worker + 任务队列 + SQL + 迁移 | `core` |
+| `data/` | 持久化层：Worker + 任务队列 + SQL + 迁移 | `core`（+ `state` 事件总线与类型） |
 | `compute/` | 计算层：图片→点阵（独立 Worker） | `core` |
 | `ui/` | 页面层：Vue 组件、状态桥接、命令转发 | 以上全部 |
 
@@ -66,7 +67,7 @@ pnpm smoke:groups   # 无头浏览器端到端冒烟（成组 / 锁定 / 刷新�
 
 | | 通道① 渲染 | 通道② 持久化 |
 | --- | --- | --- |
-| 事件 | `points:add/remove/move/color`、`selection:change` | `mutation`、`history:change` |
+| 事件 | `points:add/remove/move/color`、`points:lock`、`groups:change`、`selection:change` | `mutation`、`history:change` |
 | 触发 | 任何数据变化（含拖动预览） | 仅**已提交**的操作（含 Undo/Redo） |
 | 处理 | 渲染层订阅后**直接调 Pixi API** 改 Sprite | 进队列 → Worker → SQL |
 | 跨线程 | 否（同线程同步） | 是（`postMessage` 结构化克隆） |
@@ -94,7 +95,7 @@ EditorStore ──mutation──▶ DataService（缓冲 + 400ms 防抖）
 
 ```
 src/
-  core/          纯领域层：类型、Operation 契约、校验、空间索引、测试数据生成
+  core/          纯领域层：类型、Operation 契约、校验、几何、空间索引、ID、测试数据生成
   state/         EditorStore（运行时事实源）、HistoryManager、事件总线
   render/        PixiJS 渲染、视口变换、指针交互
   data/          数据操作层（不依赖 Vue）
@@ -111,7 +112,7 @@ src/
     worker.ts          像素运算 Worker
     client.ts          解码图片 + 调用 Worker
   ui/            Vue 组件与状态桥接
-scripts/         测试数据生成、无头冒烟（编辑器 / 图片管线）
+scripts/         测试数据生成 + 4 个无头冒烟（编辑器 / 图片 / 选择 / 分组）
 tests/           vitest 单元测试
 docs/design.md   设计说明
 ```
@@ -128,12 +129,14 @@ docs/design.md   设计说明
 磁盘始终跟随内存，不会出现两个事实源。
 
 ```ts
-interface Point { id: string; x: number; y: number; z: number; r: number; g: number; b: number; groupId?: string }
+interface Point { id: string; x: number; y: number; z: number; r: number; g: number; b: number; groupId?: string; locked?: boolean }
 ```
 
 - `x/y/z` 为有限数值，`r/g/b` 为 0~255 整数；画布只按 XY 显示，**保存/导入导出完整保留 z**。
 - 业务数据与界面临时状态分离：`selected`、`hovered`、`dragging` 不写入项目数据，
   选中状态保存在 `EditorStore.selection`。
+- 分组为独立注册表 `Project.groups: Group[]`，点位只存 `groupId` 引用；
+  锁定只存在点位上（`Point.locked`），组锁定 = 批量锁定组内点（单一事实源）。
 
 两套版本分开：
 
@@ -142,8 +145,9 @@ interface Point { id: string; x: number; y: number; z: number; r: number; g: num
 | 项目数据格式版本 | `projects.version` / `Project.version` | 随项目保存，导入时校验 |
 | 数据库结构版本 | `PRAGMA user_version` | 由 `data/schema.ts` 迁移维护 |
 
-数据库表：`projects`、`points(project_id,id,...)`、`history(project_id,seq,label,op,...)`，
-外键 `ON DELETE CASCADE`，删除项目自动清理点位与历史。
+数据库表：`projects`、`points(project_id,id,...)`、`history(project_id,seq,label,op,...)`、
+`groups(project_id,id,name,color_r,color_g,color_b)`，外键 `ON DELETE CASCADE`，
+删除项目自动清理点位、历史与分组。结构版本 v2（v1→v2 幂等自愈迁移）。
 
 ## 功能
 
@@ -153,7 +157,7 @@ interface Point { id: string; x: number; y: number; z: number; r: number; g: num
 - 分组与锁定：选中后「成组」，可整组选中 / 重命名 / 取消分组；「锁定」后该点（或整组）
   不可被选中 / 拖动 / 删除 / 改色，并在画布上变暗提示
 - 状态显示：总点数、选中数量、FPS、渲染分辨率、存储后端
-- 渲染质量：自动（按 FPS 动态分辨率）/ 高 / 均衡 / 流畅
+- 渲染质量：自动（按 FPS 动态分辨率）/ 高（原生）/ 均衡（75%）/ 流畅（50%）
 - Undo / Redo：新增 / 删除 / 移动 / 改色，快捷键 `Cmd/Ctrl+Z`、`Shift+Cmd/Ctrl+Z`
 - 项目存储：创建、保存、打开、删除、刷新恢复、导出 / 导入 JSON；删除当前项目会同时清空画布
 - 图片生成点位：导入图片 → 阈值二值化（可反相）→ 按目标点数抽稀 → 生成点阵，
@@ -204,8 +208,9 @@ interface Point { id: string; x: number; y: number; z: number; r: number; g: num
 | Node / pnpm | v24.8.0 / 10.18.2 |
 | 数据 | 20,000 点（`pnpm gen` 生成，确定性种子可复现） |
 
-- `pnpm test`：51 个用例
-  - `repository`：在 Node 内存库上验证建表、迁移、增量写入、历史裁剪(100)、级联删除
+- `pnpm test`：55 个用例（9 个测试文件）
+  - `repository`：在 Node 内存库上验证建表、增量写入、锁定/分组持久化、历史裁剪(100)、级联删除
+  - `migration`：空库迁移、重复迁移、v1 老库升级、以及「版本号已最新但缺列」的自愈场景
   - `queue`：任务串行、同 key 合并、错误隔离
   - `history` / `operations`：撤销重做的前后状态
   - `imageProcessor`：二值化、反相、透明像素、抽稀步长、坐标映射
@@ -213,7 +218,7 @@ interface Point { id: string; x: number; y: number; z: number; r: number; g: num
   - `groups`：成组 / 拆组 / 归属迁移 / 锁定不可选中与不可删除 / 撤销重做
   - `validation` / `spatial`：数据校验与空间索引
 - `pnpm smoke`：无头 Chrome 端到端——创建项目 → 生成 20,000 点 → 编辑 → 自动保存 →
-  刷新 → 从 SQLite 重新打开 → **撤销历史仍可用**。
+  刷新 → 从 SQLite 重新打开 → **撤销历史仍可用** → 删除当前项目后画布清空。
 - `pnpm smoke:image`：注入一张图片 → 二值化预览 → 生成点位 → 作为新项目落库。
 - `pnpm smoke:select`：单击选中 → **Shift 加选** → Alt 套索 → Shift+Alt 追加 → **拖拽移动点位**，
   逐步校验「已选中」数量与撤销记录。
@@ -237,8 +242,6 @@ interface Point { id: string; x: number; y: number; z: number; r: number; g: num
 
 ## 已知问题与未完成
 
-- 无头浏览器在 `reload` 时偶发渲染进程崩溃（SwiftShader 软件渲染 + WebGL 重载），
-  真机 Chrome 正常。
 - `opfs-sahpool` 不支持多标签并发写；同源多开时后开的标签会初始化失败并降级为内存模式。
 - 历史仅持久化 Undo 栈（最近 100 条），Redo 栈不持久化。
 - 增量写入目前对移动 / 改色逐行 `UPDATE`，尚未做语句级批量优化。
