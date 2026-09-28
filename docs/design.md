@@ -47,6 +47,37 @@
 - `compute` 与 `data` 是**平行的两个 Worker 层**，不是通用 util；通用的小工具（如点在多边形内判定）放在 `core`。
 - 依赖方向单一：`ui → render/data/compute/state → core`，反向依赖为零（`data` 只引用 `state` 的类型）。
 
+### 2.2 通信模型：两条通道 + 两层队列
+
+`EditorStore` 对外广播**两类事件**，走两条完全不同的通道：
+
+```
+                         ┌─ 通道① 渲染事件 points:*/selection:*（同步、同线程）
+EditorStore.events ──────┤        → PixiRenderer 直接调 Pixi API 改 Sprite 属性
+                         │        （不同线程，不走队列，不进数据库）
+                         │
+                         └─ 通道② mutation / history:change（仅已提交的数据变更）
+                                  → DataService 缓冲 + 400ms 防抖
+                                  → TaskQueue（主线程：串行 + 同 key 合并）
+                                  → postMessage（结构化克隆，跨线程）
+                                  → Worker 顺序队列（incoming 循环）
+                                  → Repository → db.transaction() → SQLite
+```
+
+要点：
+
+- **渲染不是「发命令给渲染器」**，而是渲染层订阅事件后**直接操作 Pixi API**
+  （`sprite.x/y`、`sprite.tint`、`addChild`/`destroy`），真正的绘制由 Pixi 的 ticker 驱动。
+- **两条通道互不干扰**：拖动中的 `previewMove` 只发通道①，因此只有画面变化、
+  没有历史、没有磁盘写入；`pointerup` 的 `commitMove` 才走通道②。
+- **队列分两层，职责不同**：
+  - 主线程 `TaskQueue`：调度层——串行化请求、把同 key 的待执行任务**合并**
+    （连续保存合并为一次写），并统一错误传播；
+  - Worker 内 `incoming` 顺序队列：执行层——保证 SQLite 单连接上的写操作
+    **依次进入事务**，不出现交叉事务。
+- **跨线程只传纯数据**（`Point` / `Operation` / `Mutation`），不传类实例、
+  更不传 Vue 的 reactive 代理（会被结构化克隆拒绝）。
+
 ## 3. 数据模型与事实源（对应 6.1）
 
 **唯一事实源是内存中的 `EditorStore.project`**，不是 PixiJS 显示对象，也不是数据库。
