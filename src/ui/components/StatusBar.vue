@@ -1,12 +1,9 @@
 <script setup lang="ts">
-import { computed } from 'vue'
-import { pointCount, renderInfo, selectTool, selectedCount } from '../editor'
+import { pointCount, renderInfo, selectedCount } from '../editor'
 import { currentProjectId, dirty, lastSavedAt, saving, storageMode } from '../projects'
 
-const hint = computed(() => {
-  const select = selectTool.value === 'lasso' ? '套索圈选' : '框选'
-  return `滚轮缩放 · 中键/空格+左键平移 · 左键拖动空白${select} · Shift 加选`
-})
+const hint =
+  '滚轮缩放 · 中键/空格+左键平移 · 左键拖动移动点位 · 空白拖拽框选 · Alt/Option+拖拽套索 · Shift 加选'
 
 defineProps<{ fps: number }>()
 

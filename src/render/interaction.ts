@@ -4,10 +4,14 @@
  * 交互约定：
  * - 滚轮：以光标为中心缩放
  * - 中键拖动 / 空格 + 左键拖动：平移画布
- * - 左键点空白：清空选择，并按当前选择工具进入框选 / 套索
  * - 左键点已选中的点：拖动整个选中集合
  * - 左键点未选中的点：先选中它，再拖动
+ * - 左键点空白：清空选择，进入矩形框选
+ * - Alt/Option + 左键拖动：套索（从任意位置起笔，适配密集点云）
  * - Shift + 左键点选：加选 / 反选；Shift + 空白拖拽：追加框选 / 套索
+ *
+ * 套索刻意做成「修饰键」而不是模式化工具：模式化工具会让左键失去拖拽能力，
+ * 用户很容易卡在套索模式里以为「拖不动了」。
  *
  * 性能要点：拖动过程只调用 previewMove（瞬时更新，不写历史、不标脏），
  * 仅在 pointerup 时提交一条历史记录。
@@ -19,9 +23,6 @@ import { pointInPolygon, polygonBounds, type Polygon } from '../core/geometry'
 import type { PositionUpdate, Rect } from '../core/types'
 
 type Mode = 'idle' | 'pan' | 'drag' | 'box' | 'lasso'
-
-/** 空白处拖拽的选择工具：矩形框选 / 自由套索 */
-export type SelectTool = 'box' | 'lasso'
 
 interface ScreenPos {
   x: number
@@ -36,7 +37,6 @@ export class InteractionController {
   private mode: Mode = 'idle'
   private activePointerId: number | null = null
   private spaceDown = false
-  private tool: SelectTool = 'box'
 
   private panStart: ScreenPos = { x: 0, y: 0 }
   private panViewStart = { x: 0, y: 0 }
@@ -101,15 +101,6 @@ export class InteractionController {
     window.addEventListener('keyup', this.onKeyUp)
   }
 
-  /** 切换空白拖拽时的选择工具 */
-  setTool(tool: SelectTool): void {
-    this.tool = tool
-  }
-
-  getTool(): SelectTool {
-    return this.tool
-  }
-
   // ------------------------------------------------------------- 坐标工具
 
   private toCanvas(e: PointerEvent): ScreenPos {
@@ -157,10 +148,9 @@ export class InteractionController {
       return
     }
 
-    // 套索工具：左键直接画圈，不做点命中/拖动。
-    // 原因：点云密集时不存在「空白区域」，若先命中点就没法圈选了。
+    // Alt/Option + 左键：套索。不做点命中，因此密集点云里也能起笔。
     this.boxAdditive = e.shiftKey
-    if (this.tool === 'lasso') {
+    if (e.altKey) {
       if (!this.boxAdditive) this.store.clearSelection()
       const world = this.renderer.viewport.screenToWorld(screen.x, screen.y)
       this.mode = 'lasso'

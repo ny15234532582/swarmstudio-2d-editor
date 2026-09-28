@@ -35,17 +35,6 @@ const groupRows = () =>
     els.map((el) => el.innerText.replace(/\s+/g, ' ').trim()),
   )
 
-const setTool = (v) =>
-  page.evaluate((value) => {
-    const sel = [...document.querySelectorAll('select')].find((s) =>
-      [...s.options].some((o) => o.value === value),
-    )
-    if (!sel) return false
-    sel.value = value
-    sel.dispatchEvent(new Event('change', { bubbles: true }))
-    return true
-  }, v)
-
 const result = {}
 try {
   await page.goto(url, { waitUntil: 'domcontentloaded' })
@@ -63,8 +52,8 @@ try {
   const cy = box.y + box.h / 2
   const r = Math.min(box.w, box.h) * 0.22
 
-  // 套索圈一片
-  await setTool('lasso')
+  // Alt/Option + 拖拽 = 套索，圈一片
+  await page.keyboard.down('Alt')
   await page.mouse.move(cx - r, cy)
   await page.mouse.down()
   for (let i = 1; i <= 40; i++) {
@@ -72,6 +61,7 @@ try {
     await page.mouse.move(cx + Math.cos(a) * r, cy + Math.sin(a) * r)
   }
   await page.mouse.up()
+  await page.keyboard.up('Alt')
   await sleep(500)
   result.lassoSelected = await selected()
 

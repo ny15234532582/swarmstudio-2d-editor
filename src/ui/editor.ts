@@ -10,7 +10,6 @@ import { computed, ref } from 'vue'
 import { EditorStore } from '../state/store'
 import { createProject } from '../core/factory'
 import type { RenderInfo, RenderQuality } from '../render/renderer'
-import type { SelectTool } from '../render/interaction'
 
 export const editor = new EditorStore(createProject('未命名项目'))
 
@@ -124,18 +123,3 @@ export function updateRenderInfo(info: RenderInfo): void {
   renderQuality.value = info.quality
 }
 
-// --------------------------------------------------------------- 选择工具
-
-let toolController: { setTool(tool: SelectTool): void } | null = null
-
-/** 由 App 注入交互控制器，让 UI 能切换框选 / 套索 */
-export function setToolController(controller: { setTool(tool: SelectTool): void }): void {
-  toolController = controller
-}
-
-export const selectTool = ref<SelectTool>('box')
-
-export function setSelectTool(tool: SelectTool): void {
-  selectTool.value = tool
-  toolController?.setTool(tool)
-}

@@ -149,7 +149,7 @@ interface Point { id: string; x: number; y: number; z: number; r: number; g: num
 
 - PixiJS 画布：加载 / 绘制、RGB 显色、平移、缩放与适配、单点选中高亮、拖动
 - 点位编辑：新增、删除、移动、多点选择（Shift 加选 / 框选 / 套索）、批量改色、取消选择
-- 选择工具：框选（矩形）与套索（自由圈选），套索可圈出任意形状区域，Shift 追加
+- 选择：左键点空白框选、点住点拖动；**Alt/Option + 左键拖拽 = 套索**（可圈任意形状），Shift 追加
 - 分组与锁定：选中后「成组」，可整组选中 / 重命名 / 取消分组；「锁定」后该点（或整组）
   不可被选中 / 拖动 / 删除 / 改色，并在画布上变暗提示
 - 状态显示：总点数、选中数量、FPS、渲染分辨率、存储后端
@@ -167,8 +167,8 @@ interface Point { id: string; x: number; y: number; z: number; r: number; g: num
 | --- | --- |
 | 缩放 | 滚轮（以光标为中心） |
 | 平移 | 中键拖动 / 空格 + 左键拖动 |
-| 框选 | 左键在空白处拖拽（选择工具=框选） |
-| 套索圈选 | 工具栏选择工具切到「套索」，左键自由拖拽成圈 |
+| 框选 | 左键在空白处拖拽 |
+| 套索圈选 | **Alt/Option + 左键拖拽**，从任意位置起笔 |
 | 加选 / 反选 | Shift + 左键点选；Shift + 框选/套索为追加 |
 | 删除选中 | Delete / Backspace |
 | 撤销 / 重做 | Cmd/Ctrl+Z / Shift+Cmd/Ctrl+Z |
@@ -186,7 +186,7 @@ interface Point { id: string; x: number; y: number; z: number; r: number; g: num
 
 ![套索圈选](docs/screenshots/lasso.png)
 
-（套索工具自由圈选区域，落点即选中。）
+（Alt + 拖拽套索，自由圈选区域，落点即选中。）
 
 ![分组与锁定](docs/screenshots/groups.png)
 
@@ -215,8 +215,8 @@ interface Point { id: string; x: number; y: number; z: number; r: number; g: num
 - `pnpm smoke`：无头 Chrome 端到端——创建项目 → 生成 20,000 点 → 编辑 → 自动保存 →
   刷新 → 从 SQLite 重新打开 → **撤销历史仍可用**。
 - `pnpm smoke:image`：注入一张图片 → 二值化预览 → 生成点位 → 作为新项目落库。
-- `pnpm smoke:select`：单击选中 → **Shift 加选** → 套索圈选 → Shift 套索追加，
-  逐步校验「已选中」数量。
+- `pnpm smoke:select`：单击选中 → **Shift 加选** → Alt 套索 → Shift+Alt 追加 → **拖拽移动点位**，
+  逐步校验「已选中」数量与撤销记录。
 - `pnpm smoke:groups`：套索圈选 → 成组 → 锁定 → 刷新重开后分组与锁定仍在 → 解锁后可再选中。
 - 性能：界面右下角实时显示 FPS 与实际渲染分辨率。工具栏提供画质档位
   （自动/高/均衡/流畅），`自动` 会按 FPS 动态升降分辨率。

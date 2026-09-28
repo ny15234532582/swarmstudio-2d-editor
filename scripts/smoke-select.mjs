@@ -16,22 +16,17 @@ await page.setViewport({ width: 1400, height: 900 })
 const errors = []
 page.on('pageerror', (e) => errors.push(String(e)))
 
+const undoTitle = () =>
+  page.evaluate(() => {
+    const b = [...document.querySelectorAll('button')].find((el) => el.textContent?.includes('撤销'))
+    return b ? { disabled: b.disabled, title: b.getAttribute('title') } : null
+  })
+
 const selected = async () => {
   const t = await page.evaluate(() => document.body.innerText)
   const line = t.split('\n').find((l) => l.includes('已选中')) ?? ''
   return Number(line.replace(/\D/g, '')) || 0
 }
-
-const setTool = (value) =>
-  page.evaluate((v) => {
-    const sel = [...document.querySelectorAll('select')].find((s) =>
-      [...s.options].some((o) => o.value === v),
-    )
-    if (!sel) return false
-    sel.value = v
-    sel.dispatchEvent(new Event('change', { bubbles: true }))
-    return true
-  }, value)
 
 const result = {}
 try {
@@ -63,10 +58,9 @@ try {
   await page.keyboard.up('Shift')
   result.afterShiftClick = await selected()
 
-  // 3) 切到套索，圈一片区域
-  result.toolSwitched = await setTool('lasso')
-  await sleep(200)
+  // 3) Alt/Option + 拖拽 = 套索，圈一片区域
   const r = Math.min(box.w, box.h) * 0.28
+  await page.keyboard.down('Alt')
   await page.mouse.move(cx - r, cy)
   await page.mouse.down()
   for (let i = 1; i <= 48; i++) {
@@ -75,11 +69,13 @@ try {
     if (i === 40) await page.screenshot({ path: '/tmp/lasso.png' })
   }
   await page.mouse.up()
+  await page.keyboard.up('Alt')
   await sleep(400)
   result.afterLasso = await selected()
 
-  // 4) Shift + 套索追加
+  // 4) Shift + Alt + 套索追加
   await page.keyboard.down('Shift')
+  await page.keyboard.down('Alt')
   await page.mouse.move(cx - r * 0.5, cy - r * 1.4)
   await page.mouse.down()
   for (let i = 1; i <= 32; i++) {
@@ -87,9 +83,28 @@ try {
     await page.mouse.move(cx - r * 0.5 + Math.cos(a) * r * 0.5, cy - r * 1.4 + Math.sin(a) * r * 0.5)
   }
   await page.mouse.up()
+  await page.keyboard.up('Alt')
   await page.keyboard.up('Shift')
   await sleep(400)
   result.afterLassoAdd = await selected()
+
+  // 5) 拖拽回归：单击选中后拖动，撤销记录应出现「移动点位」
+  await page.evaluate(() => {
+    const b = [...document.querySelectorAll('button')].find((el) => el.textContent?.includes('取消选择'))
+    b?.click()
+  })
+  await sleep(200)
+  await page.mouse.click(cx, cy)
+  await sleep(250)
+  const before = await undoTitle()
+  await page.mouse.move(cx, cy)
+  await page.mouse.down()
+  for (let i = 1; i <= 10; i++) await page.mouse.move(cx + i * 6, cy + i * 4)
+  await page.mouse.up()
+  await sleep(400)
+  result.dragBefore = before?.title
+  result.dragAfter = (await undoTitle())?.title
+  result.dragWorks = result.dragAfter === '撤销：移动点位'
 
   result.errorCount = errors.length
   console.log(JSON.stringify(result, null, 2))
