@@ -17,6 +17,7 @@ await page.setViewport({ width: 1400, height: 900 })
 
 const errors = []
 const consoleErrors = []
+page.on('dialog', (d) => d.accept())
 page.on('pageerror', (e) => errors.push(String(e)))
 page.on('console', (m) => {
   if (m.type() === 'error') consoleErrors.push(m.text())
@@ -79,6 +80,13 @@ try {
     const b = [...document.querySelectorAll('button')].find((el) => el.textContent?.includes('撤销'))
     return b ? !b.disabled : null
   })
+
+  log('delete current project -> canvas should clear')
+  result.pointsBeforeDelete = line(await text(), '总点数')
+  await page.evaluate(() => document.querySelector('.list li .danger')?.click())
+  await sleep(1500)
+  result.pointsAfterDelete = line(await text(), '总点数')
+  result.projectCountAfterDelete = await page.$$eval('.list li', (els) => els.length)
 
   result.errorCount = errors.length
   result.consoleErrorCount = consoleErrors.length

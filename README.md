@@ -155,7 +155,7 @@ interface Point { id: string; x: number; y: number; z: number; r: number; g: num
 - 状态显示：总点数、选中数量、FPS、渲染分辨率、存储后端
 - 渲染质量：自动（按 FPS 动态分辨率）/ 高 / 均衡 / 流畅
 - Undo / Redo：新增 / 删除 / 移动 / 改色，快捷键 `Cmd/Ctrl+Z`、`Shift+Cmd/Ctrl+Z`
-- 项目存储：创建、保存、打开、删除、刷新恢复、导出 / 导入 JSON
+- 项目存储：创建、保存、打开、删除、刷新恢复、导出 / 导入 JSON；删除当前项目会同时清空画布
 - 图片生成点位：导入图片 → 阈值二值化（可反相）→ 按目标点数抽稀 → 生成点阵，
   全程在独立 compute worker，参数实时预览
 - 自动保存：提交后 400ms 防抖；拖动期间的 `pointermove` 不触发持久化
