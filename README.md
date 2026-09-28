@@ -33,8 +33,10 @@ pnpm smoke:groups   # 无头浏览器端到端冒烟（成组 / 锁定 / 刷新�
 
 ## 技术选型
 
-- **PixiJS 8**：每个点用一个共享圆形纹理的 `Sprite`（而非逐点 `Graphics`），
-  由 GPU 合批，20,000 点接近常数个 draw call；移动 / 改色只改对应 Sprite 属性。
+- **PixiJS 8**（`package.json` 声明 `^8.6.6`，实际安装 **8.21.0**）：每个点用一个共享圆形
+  纹理的 `Sprite`（而非逐点 `Graphics`），由 GPU 合批，20,000 点接近常数个 draw call；
+  移动 / 改色只改对应 Sprite 属性。`Application.init({ preference: 'webgl', antialias: false })`，
+  渲染分辨率由 `renderer.resize(w, h, resolution)` 控制。
 - **SQLite WASM（`@sqlite.org/sqlite-wasm`）**：用 SQL 封装项目数据，
   结构化查询、事务、增量写入都更直接。
 - **OPFS `opfs-sahpool` VFS**：数据库文件存放在 OPFS。选择该 VFS 的原因：
