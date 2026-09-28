@@ -31,6 +31,19 @@ pnpm smoke:groups   # 无头浏览器端到端冒烟（成组 / 锁定 / 刷新�
 
 > 冒烟脚本依赖本机 Chrome，可用 `CHROME_PATH=/path/to/chrome pnpm smoke` 指定。
 
+## 在线 Demo（GitHub Pages）
+
+仓库内置 `.github/workflows/deploy.yml`：推送到 `main` 会自动跑测试、构建，并以子路径
+`/<repo>/` 发布到 GitHub Pages。**首次需在 仓库 Settings → Pages → Source 选择
+「GitHub Actions」**，之后地址为：
+
+```
+https://ny15234532582.github.io/swarmstudio-2d-editor/
+```
+
+> 选 `opfs-sahpool` 的原因之一就是它**不需要 COOP/COEP 响应头**，因此可以直接静态托管。
+> 本地验证子路径构建：`BASE_PATH=/swarmstudio-2d-editor/ pnpm build`。
+
 ## 技术选型
 
 - **PixiJS 8**（`package.json` 声明 `^8.6.6`，实际安装 **8.21.0**）：每个点用一个共享圆形
