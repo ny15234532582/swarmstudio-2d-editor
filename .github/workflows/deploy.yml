@@ -41,7 +41,8 @@ jobs:
           if [ $code -ne 0 ]; then
             echo "pnpm test 退出码 $code"
             # 把失败输出打成 annotation，便于在公开的 check-runs API 里查看
-            tail -c 4000 /tmp/test.log | while IFS= read -r line; do
+            grep -n -iE "error|cannot|failed|fail |ENOENT|wasm|sqlite|cannot find" /tmp/test.log \
+              | head -12 | while IFS= read -r line; do
               echo "::error::$line"
             done
             exit $code
