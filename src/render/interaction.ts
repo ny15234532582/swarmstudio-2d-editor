@@ -4,10 +4,10 @@
  * 交互约定：
  * - 滚轮：以光标为中心缩放
  * - 中键拖动 / 空格 + 左键拖动：平移画布
- * - 左键点空白：清空选择，并进入框选（加分项）
+ * - 左键点空白：清空选择，并按当前选择工具进入框选 / 套索
  * - 左键点已选中的点：拖动整个选中集合
  * - 左键点未选中的点：先选中它，再拖动
- * - Shift + 左键点选：加选 / 反选
+ * - Shift + 左键点选：加选 / 反选；Shift + 空白拖拽：追加框选 / 套索
  *
  * 性能要点：拖动过程只调用 previewMove（瞬时更新，不写历史、不标脏），
  * 仅在 pointerup 时提交一条历史记录。
@@ -15,19 +15,28 @@
 import type { EditorStore } from '../state/store'
 import type { PixiRenderer } from '../render/renderer'
 import { POINT_RADIUS } from '../render/renderer'
+import { pointInPolygon, polygonBounds, type Polygon } from '../core/geometry'
 import type { PositionUpdate, Rect } from '../core/types'
 
-type Mode = 'idle' | 'pan' | 'drag' | 'box'
+type Mode = 'idle' | 'pan' | 'drag' | 'box' | 'lasso'
+
+/** 空白处拖拽的选择工具：矩形框选 / 自由套索 */
+export type SelectTool = 'box' | 'lasso'
 
 interface ScreenPos {
   x: number
   y: number
 }
 
+const SVG_NS = 'http://www.w3.org/2000/svg'
+/** 套索相邻采样点的最小世界距离，避免记录过密 */
+const LASSO_MIN_STEP = 2
+
 export class InteractionController {
   private mode: Mode = 'idle'
   private activePointerId: number | null = null
   private spaceDown = false
+  private tool: SelectTool = 'box'
 
   private panStart: ScreenPos = { x: 0, y: 0 }
   private panViewStart = { x: 0, y: 0 }
@@ -41,6 +50,11 @@ export class InteractionController {
   private boxAdditive = false
 
   private boxEl: HTMLDivElement
+
+  // 套索：世界坐标下的自由多边形
+  private lassoWorld: Polygon = []
+  private svgEl: SVGSVGElement
+  private lassoEl: SVGPolygonElement
 
   constructor(
     private store: EditorStore,
@@ -59,6 +73,24 @@ export class InteractionController {
     })
     host.appendChild(this.boxEl)
 
+    this.svgEl = document.createElementNS(SVG_NS, 'svg')
+    Object.assign(this.svgEl.style, {
+      position: 'absolute',
+      inset: '0',
+      width: '100%',
+      height: '100%',
+      pointerEvents: 'none',
+      display: 'none',
+      zIndex: '6',
+    })
+    this.lassoEl = document.createElementNS(SVG_NS, 'polygon')
+    this.lassoEl.setAttribute('fill', 'rgba(54,198,255,0.12)')
+    this.lassoEl.setAttribute('stroke', '#36c6ff')
+    this.lassoEl.setAttribute('stroke-width', '1')
+    this.lassoEl.setAttribute('stroke-dasharray', '4 3')
+    this.svgEl.appendChild(this.lassoEl)
+    host.appendChild(this.svgEl)
+
     canvas.addEventListener('pointerdown', this.onPointerDown)
     canvas.addEventListener('pointermove', this.onPointerMove)
     canvas.addEventListener('pointerup', this.onPointerUp)
@@ -67,6 +99,15 @@ export class InteractionController {
     canvas.addEventListener('contextmenu', this.onContextMenu)
     window.addEventListener('keydown', this.onKeyDown)
     window.addEventListener('keyup', this.onKeyUp)
+  }
+
+  /** 切换空白拖拽时的选择工具 */
+  setTool(tool: SelectTool): void {
+    this.tool = tool
+  }
+
+  getTool(): SelectTool {
+    return this.tool
   }
 
   // ------------------------------------------------------------- 坐标工具
@@ -116,6 +157,18 @@ export class InteractionController {
       return
     }
 
+    // 套索工具：左键直接画圈，不做点命中/拖动。
+    // 原因：点云密集时不存在「空白区域」，若先命中点就没法圈选了。
+    this.boxAdditive = e.shiftKey
+    if (this.tool === 'lasso') {
+      if (!this.boxAdditive) this.store.clearSelection()
+      const world = this.renderer.viewport.screenToWorld(screen.x, screen.y)
+      this.mode = 'lasso'
+      this.lassoWorld = [world.x, world.y]
+      this.updateLassoEl()
+      return
+    }
+
     const hitId = this.pick(screen)
 
     if (e.shiftKey) {
@@ -139,12 +192,12 @@ export class InteractionController {
       return
     }
 
-    // 点空白：清空选择并进入框选
-    this.mode = 'box'
+    // 点空白：进入框选
     this.boxAdditive = e.shiftKey
+    if (!this.boxAdditive) this.store.clearSelection()
+    this.mode = 'box'
     this.boxStartWorld = this.renderer.viewport.screenToWorld(screen.x, screen.y)
     this.boxCurrentWorld = this.boxStartWorld
-    if (!this.boxAdditive) this.store.clearSelection()
     this.updateBoxEl(screen, screen)
   }
 
@@ -180,6 +233,18 @@ export class InteractionController {
     if (this.mode === 'box') {
       this.boxCurrentWorld = this.renderer.viewport.screenToWorld(screen.x, screen.y)
       this.updateBoxEl(this.boxStartScreen, screen)
+      return
+    }
+
+    if (this.mode === 'lasso') {
+      const world = this.renderer.viewport.screenToWorld(screen.x, screen.y)
+      const n = this.lassoWorld.length
+      const dx = world.x - this.lassoWorld[n - 2]
+      const dy = world.y - this.lassoWorld[n - 1]
+      if (dx * dx + dy * dy >= LASSO_MIN_STEP * LASSO_MIN_STEP) {
+        this.lassoWorld.push(world.x, world.y)
+        this.updateLassoEl()
+      }
     }
   }
 
@@ -192,6 +257,9 @@ export class InteractionController {
     } else if (this.mode === 'box') {
       this.finalizeBox()
       this.boxEl.style.display = 'none'
+    } else if (this.mode === 'lasso') {
+      this.finalizeLasso()
+      this.svgEl.style.display = 'none'
     }
 
     this.mode = 'idle'
@@ -233,6 +301,33 @@ export class InteractionController {
       if (p.x >= rect.x && p.x <= rect.x + rect.width && p.y >= rect.y && p.y <= rect.y + rect.height) {
         hits.push(id)
       }
+    }
+    this.store.selectMany(hits, this.boxAdditive ? 'add' : 'replace')
+  }
+
+  // ------------------------------------------------------------- 套索
+
+  private updateLassoEl(): void {
+    const vp = this.renderer.viewport
+    const parts: string[] = []
+    for (let i = 0; i < this.lassoWorld.length; i += 2) {
+      const s = vp.worldToScreen(this.lassoWorld[i], this.lassoWorld[i + 1])
+      parts.push(`${s.x},${s.y}`)
+    }
+    this.lassoEl.setAttribute('points', parts.join(' '))
+    this.svgEl.style.display = this.lassoWorld.length >= 6 ? 'block' : 'none'
+  }
+
+  private finalizeLasso(): void {
+    // 至少 3 个顶点才构成有效多边形
+    if (this.lassoWorld.length < 6) return
+    const bounds = polygonBounds(this.lassoWorld)
+    const candidates = this.store.getSpatial().queryRect(bounds)
+    const hits: string[] = []
+    for (const id of candidates) {
+      const p = this.store.getPoint(id)
+      if (!p) continue
+      if (pointInPolygon(p.x, p.y, this.lassoWorld)) hits.push(id)
     }
     this.store.selectMany(hits, this.boxAdditive ? 'add' : 'replace')
   }
@@ -281,5 +376,6 @@ export class InteractionController {
     window.removeEventListener('keydown', this.onKeyDown)
     window.removeEventListener('keyup', this.onKeyUp)
     this.boxEl.remove()
+    this.svgEl.remove()
   }
 }

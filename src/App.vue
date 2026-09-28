@@ -2,7 +2,7 @@
 import { onBeforeUnmount, onMounted, ref } from 'vue'
 import { PixiRenderer } from './render/renderer'
 import { InteractionController } from './render/interaction'
-import { editor, setQualityController, setViewportCenterProvider, updateRenderInfo } from './ui/editor'
+import { editor, setQualityController, setToolController, setViewportCenterProvider, updateRenderInfo } from './ui/editor'
 import { loadPointsAsProject, refreshProjects, saveProject } from './ui/projects'
 import { generatePoints } from './core/testdata'
 import TopToolbar from './ui/components/TopToolbar.vue'
@@ -35,6 +35,7 @@ onMounted(async () => {
     renderer.app!.canvas as unknown as HTMLCanvasElement,
     host,
   )
+  setToolController(interaction)
 
   setViewportCenterProvider(() => {
     const app = renderer!.app!

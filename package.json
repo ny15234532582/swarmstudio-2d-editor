@@ -12,6 +12,7 @@
     "test": "vitest run",
     "smoke": "node scripts/smoke.mjs",
     "smoke:image": "node scripts/smoke-image.mjs",
+    "smoke:select": "node scripts/smoke-select.mjs",
     "gen": "node scripts/gen-points.mjs"
   },
   "dependencies": {

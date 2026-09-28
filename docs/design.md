@@ -76,8 +76,9 @@
 | 选中状态 | `state/store.ts` | selection 集合与选择模式 |
 | Undo/Redo | `state/history.ts` + `core/operations.ts` | 双栈 + 可序列化 Operation |
 | PixiJS 渲染 | `render/renderer.ts` | Sprite 池、增量更新、选中高亮、FPS |
-| 视口交互 | `render/viewport.ts` + `render/interaction.ts` | 平移缩放、命中、拖动、框选 |
+| 视口交互 | `render/viewport.ts` + `render/interaction.ts` | 平移缩放、命中、拖动、框选、套索 |
 | 存储 | `data/*` | SQLite + OPFS + Worker + 队列 |
+| 几何工具 | `core/geometry.ts` | 点在多边形内判定（射线法）、包围盒 |
 | JSON 导入导出 | `data/json.ts` | 校验后导入 / 导出下载 |
 | 图片→点阵 | `compute/*` | 解码、二值化、抽稀，独立 compute worker |
 | Vue 页面与 UI | `ui/*` | 展示与命令转发 |
@@ -188,6 +189,24 @@ PixiJS v8 是官方支持 Worker 渲染的（`DOMAdapter.set(WebWorkerAdapter)`�
 - **实例化网格**：十万级点位改用 instanced mesh，把顶点属性压到最少。
 - **纹理图集**：若未来点有多种外观（图标/形状），合并到一张图集避免断批。
 
+### 7.3 套索选择（工具化，而非修饰键）
+
+需求是「手动圈出任意区域选中点位」，做法：
+
+- **交互**：工具栏切换「框选 / 套索」。套索模式下左键直接开始画自由多边形，
+  移动时按最小世界距离抽点（避免顶点过密），松开后闭合多边形做命中判定；
+  Shift + 套索为追加选择。
+- **为什么做成独立工具而不是某个修饰键**：点云密集时画面里几乎没有「空白区域」，
+  如果沿用「命中点就拖动、点空白才框选」的规则，套索几乎无法起笔。
+  工具化后套索模式不参与点命中，任何位置都能起笔。
+- **命中**：先用空间网格取多边形包围盒内的候选点（`polygonBounds` + `queryRect`），
+  再逐点做射线法判定（`pointInPolygon`，even-odd）——把 O(n) 全量判断降为
+  「包围盒候选 + 精确判断」。
+- **绘制**：套索路径用一层 SVG `<polygon>` 覆盖在 Pixi 画布之上（屏幕坐标），
+  与视图变换解耦；数据侧只保留世界坐标多边形。
+- **可测试性**：点在多边形内的判定是纯函数（`core/geometry.ts`），
+  覆盖凸多边形、凹多边形、三角形与顶点不足等边界。
+
 ## 8. 图片导入 → 二值化 → 生成点位（compute worker）
 
 对应题目选做项「图片导入」「图片二值化并生成点位」「使用 Worker 处理数据」。
@@ -277,13 +296,15 @@ Worker 内还有一层顺序执行循环，确保请求按到达顺序进入事�
 
 ## 11. 测试与验证
 
-- 单元测试（`pnpm test`，34 例）：仓储层在 Node 内存 SQLite 上真实执行 SQL，
+- 单元测试（`pnpm test`，40 例）：仓储层在 Node 内存 SQLite 上真实执行 SQL，
   覆盖迁移、增量写入、历史裁剪、级联删除；队列覆盖串行 / 合并 / 错误隔离；
-  `imageProcessor` 覆盖二值化、反相、透明像素、抽稀步长与坐标映射。
+  `imageProcessor` 覆盖二值化、反相、透明像素、抽稀步长与坐标映射；
+  `geometry` 覆盖套索的点在多边形内判定。
 - 端到端：
   - `pnpm smoke`：无头 Chrome 验证 OPFS(opfs-sahpool) 落盘、20,000 点加载、编辑、
     自动保存、刷新后从 SQLite 重新打开、撤销历史恢复。
   - `pnpm smoke:image`：注入一张图片 → 二值化预览 → 生成点位 → 作为新项目落库。
+  - `pnpm smoke:select`：单击选中 → Shift 加选 → 套索圈选 → Shift 套索追加。
 - 性能观测：界面实时 FPS；无头软件渲染下 20,000 点约 60 FPS
   （关闭 MSAA 前约 28 FPS），真机 GPU 下更高。
 

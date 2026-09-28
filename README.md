@@ -24,6 +24,7 @@ pnpm test           # 单元测试（vitest）
 pnpm gen            # 生成 20,000 点测试数据 -> data/test-20000.json
 pnpm smoke          # 无头浏览器端到端冒烟（编辑器，需要本地 Chrome）
 pnpm smoke:image    # 无头浏览器端到端冒烟（图片生成点位）
+pnpm smoke:select   # 无头浏览器端到端冒烟（Shift 加选 / 套索圈选）
 ```
 
 > 冒烟脚本依赖本机 Chrome，可用 `CHROME_PATH=/path/to/chrome pnpm smoke` 指定。
@@ -97,7 +98,8 @@ interface Point { id: string; x: number; y: number; z: number; r: number; g: num
 ## 功能
 
 - PixiJS 画布：加载 / 绘制、RGB 显色、平移、缩放与适配、单点选中高亮、拖动
-- 点位编辑：新增、删除、移动、多点选择（Shift 加选 / 左键拖拽框选）、批量改色、取消选择
+- 点位编辑：新增、删除、移动、多点选择（Shift 加选 / 框选 / 套索）、批量改色、取消选择
+- 选择工具：框选（矩形）与套索（自由圈选），套索可圈出任意形状区域，Shift 追加
 - 状态显示：总点数、选中数量、FPS、渲染分辨率、存储后端
 - 渲染质量：自动（按 FPS 动态分辨率）/ 高 / 均衡 / 流畅
 - Undo / Redo：新增 / 删除 / 移动 / 改色，快捷键 `Cmd/Ctrl+Z`、`Shift+Cmd/Ctrl+Z`
@@ -112,8 +114,9 @@ interface Point { id: string; x: number; y: number; z: number; r: number; g: num
 | --- | --- |
 | 缩放 | 滚轮（以光标为中心） |
 | 平移 | 中键拖动 / 空格 + 左键拖动 |
-| 框选 | 左键在空白处拖拽 |
-| 加选 / 反选 | Shift + 左键点选 |
+| 框选 | 左键在空白处拖拽（选择工具=框选） |
+| 套索圈选 | 工具栏选择工具切到「套索」，左键自由拖拽成圈 |
+| 加选 / 反选 | Shift + 左键点选；Shift + 框选/套索为追加 |
 | 删除选中 | Delete / Backspace |
 | 撤销 / 重做 | Cmd/Ctrl+Z / Shift+Cmd/Ctrl+Z |
 | 保存 | Cmd/Ctrl+S |
@@ -128,6 +131,10 @@ interface Point { id: string; x: number; y: number; z: number; r: number; g: num
 
 （导入图片 → 二值化实时预览 → 生成点位。）
 
+![套索圈选](docs/screenshots/lasso.png)
+
+（套索工具自由圈选区域，落点即选中。）
+
 ## 测试与性能验证
 
 ### 性能验证环境
@@ -140,15 +147,18 @@ interface Point { id: string; x: number; y: number; z: number; r: number; g: num
 | Node / pnpm | v24.8.0 / 10.18.2 |
 | 数据 | 20,000 点（`pnpm gen` 生成，确定性种子可复现） |
 
-- `pnpm test`：34 个用例
+- `pnpm test`：40 个用例
   - `repository`：在 Node 内存库上验证建表、迁移、增量写入、历史裁剪(100)、级联删除
   - `queue`：任务串行、同 key 合并、错误隔离
   - `history` / `operations`：撤销重做的前后状态
   - `imageProcessor`：二值化、反相、透明像素、抽稀步长、坐标映射
+  - `geometry`：套索的点在多边形内判定（射线法）
   - `validation` / `spatial`：数据校验与空间索引
 - `pnpm smoke`：无头 Chrome 端到端——创建项目 → 生成 20,000 点 → 编辑 → 自动保存 →
   刷新 → 从 SQLite 重新打开 → **撤销历史仍可用**。
 - `pnpm smoke:image`：注入一张图片 → 二值化预览 → 生成点位 → 作为新项目落库。
+- `pnpm smoke:select`：单击选中 → **Shift 加选** → 套索圈选 → Shift 套索追加，
+  逐步校验「已选中」数量。
 - 性能：界面右下角实时显示 FPS 与实际渲染分辨率。工具栏提供画质档位
   （自动/高/均衡/流畅），`自动` 会按 FPS 动态升降分辨率。
   上述无头软件渲染环境下，20,000 点关闭 MSAA 后实测约 60 FPS

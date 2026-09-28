@@ -7,11 +7,14 @@ import {
   editor,
   redoLabel,
   renderQuality,
+  selectTool,
   selectedCount,
   setRenderQuality,
+  setSelectTool,
   undoLabel,
 } from '../editor'
 import type { RenderQuality } from '../../render/renderer'
+import type { SelectTool } from '../../render/interaction'
 import { toast } from '../toast'
 
 const emit = defineEmits<{
@@ -24,6 +27,10 @@ const color = ref('#4ea1ff')
 
 function onQualityChange(e: Event): void {
   setRenderQuality((e.target as HTMLSelectElement).value as RenderQuality)
+}
+
+function onToolChange(e: Event): void {
+  setSelectTool((e.target as HTMLSelectElement).value as SelectTool)
 }
 
 function applyColor(): void {
@@ -67,6 +74,11 @@ function applyColor(): void {
     <div class="divider" />
 
     <div class="group">
+      <label class="label">选择</label>
+      <select :value="selectTool" @change="onToolChange">
+        <option value="box">框选</option>
+        <option value="lasso">套索</option>
+      </select>
       <button @click="emit('fit')">适配视图</button>
       <button @click="editor.clearSelection()">取消选择</button>
     </div>
