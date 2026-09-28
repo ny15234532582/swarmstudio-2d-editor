@@ -333,6 +333,10 @@ groups(project_id, id, name, color_r, color_g, color_b,
 - `op` 列存 Operation 的 JSON；`version` 与 `user_version` 分别管数据格式与结构。
 - 结构升级按版本逐级迁移：**v1 → v2** 用 `ALTER TABLE points ADD COLUMN locked`
   并新建 `groups` 表，因此旧库能原地升级、旧数据不丢。
+- 迁移**幂等且自愈**：不单纯信任 `PRAGMA user_version`，而是直接检查列 / 表是否存在
+  （`PRAGMA table_info`）再决定是否补建。这样即使版本号与实际结构不一致
+  （例如版本号已是 2 但 `locked` 列没加上），下次打开也会自动补齐，
+  不会卡在 `no such column: locked`。
 - 写入策略：点位增删移改 / 锁定 / 归属走 mutation 增量写；**分组结构与历史**
   每次整体覆盖（量小，覆盖更简单且不会出现不一致）。
 
