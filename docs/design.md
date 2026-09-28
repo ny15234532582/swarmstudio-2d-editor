@@ -31,6 +31,22 @@
 分层原则：`core`（领域）← `state`（运行时）← `data`/`compute`（不依赖 Vue）← `ui`。
 `data`、`compute` 只单向依赖 `core`（与 `state` 的类型），UI 与 Worker 之间没有直接调用。
 
+### 2.1 分层速览
+
+| 目录 | 角色 | 内容 | 依赖 |
+| --- | --- | --- | --- |
+| `core/` | **领域内核**（叶子，谁都能用） | 类型、`Operation` 契约、校验、几何/空间索引、ID、测试数据 | 无 |
+| `state/` | **内存事实源** | `EditorStore` + `HistoryManager` + 事件总线 | `core` |
+| `render/` | **显示层（PixiJS）** | 渲染、视口变换、指针交互 | `core`、`state` |
+| `data/` | **持久化层（SQLite/OPFS）** | Worker + 任务队列 + SQL + 迁移 | `core`（+ `state` 类型） |
+| `compute/` | **计算层（独立 Worker）** | 图片→点阵的纯计算与 Worker 通信 | `core` |
+| `ui/` | **页面层** | Vue 组件、状态桥接、命令转发 | 以上全部 |
+
+说明：
+- `core` 是共享内核，不是「业务逻辑大杂烩」——它只放纯数据与纯函数，不放状态与副作用。
+- `compute` 与 `data` 是**平行的两个 Worker 层**，不是通用 util；通用的小工具（如点在多边形内判定）放在 `core`。
+- 依赖方向单一：`ui → render/data/compute/state → core`，反向依赖为零（`data` 只引用 `state` 的类型）。
+
 ## 3. 数据模型与事实源（对应 6.1）
 
 **唯一事实源是内存中的 `EditorStore.project`**，不是 PixiJS 显示对象，也不是数据库。

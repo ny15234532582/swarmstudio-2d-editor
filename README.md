@@ -70,6 +70,10 @@ tests/           vitest 单元测试
 docs/design.md   设计说明
 ```
 
+分层：`core`（领域内核，无依赖）← `state`（内存事实源）← `render`（PixiJS）/
+`data`（SQLite+OPFS）/ `compute`（图片计算 Worker）← `ui`（页面）。依赖方向单一，
+详见 [设计说明 §2.1](docs/design.md)。
+
 ## 数据模型与版本
 
 存储分两层：**内存层**（`EditorStore` + `HistoryManager`）是运行时权威事实源，
