@@ -85,9 +85,9 @@ function applyColor(): void {
       <label class="label">画质</label>
       <select :value="renderQuality" @change="onQualityChange">
         <option value="auto">自动（动态分辨率）</option>
-        <option value="high">高</option>
-        <option value="balanced">均衡</option>
-        <option value="fast">流畅</option>
+        <option value="high">高（原生）</option>
+        <option value="balanced">均衡（75%）</option>
+        <option value="fast">流畅（50%）</option>
       </select>
       <button @click="emit('generate', 20000)">生成 20,000 点测试数据</button>
       <button @click="emit('import-image')">导入图片生成点位</button>

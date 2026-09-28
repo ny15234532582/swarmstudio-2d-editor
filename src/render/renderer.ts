@@ -13,7 +13,7 @@
 import { Application, Container, Sprite, Texture } from 'pixi.js'
 import type { EditorStore } from '../state/store'
 import type { Point } from '../core/types'
-import { Viewport } from './viewport'
+import { Viewport, clamp } from './viewport'
 
 /** 点在世界坐标下的显示半径 */
 export const POINT_RADIUS = 4
@@ -28,14 +28,25 @@ function rgbToHex(r: number, g: number, b: number): number {
   return (r << 16) | (g << 8) | b
 }
 
-/** 渲染质量档位。auto 会在高低档之间按实时 FPS 动态调整分辨率。 */
+/** 渲染质量档位。auto 会按实时 FPS 动态调整分辨率。 */
 export type RenderQuality = 'auto' | 'high' | 'balanced' | 'fast'
 
-const RESOLUTION_CAP: Record<'high' | 'balanced' | 'fast', number> = {
-  high: 2,
-  balanced: 1.25,
-  fast: 1,
+/**
+ * 档位是**相对设备像素比**的比例，而不是绝对分辨率上限。
+ *
+ * 用绝对值封顶（高=2、均衡=1.25…）在 1x 屏上会退化成三档全等于 1.0x，
+ * 菜单形同虚设；用比例后：Retina(2x) → 2.0/1.5/1.0，普通屏(1x) → 1.0/0.75/0.5，
+ * 两种屏幕都能真实改变填充量。
+ */
+const RESOLUTION_FACTOR: Record<'high' | 'balanced' | 'fast', number> = {
+  high: 1,
+  balanced: 0.75,
+  fast: 0.5,
 }
+
+/** 生效分辨率的硬限制（过高无意义、过低会糊） */
+const MIN_RESOLUTION = 0.5
+const MAX_RESOLUTION = 2
 
 /** 自适应分辨率的上下限与触发阈值 */
 const MIN_AUTO_SCALE = 0.5
@@ -46,7 +57,7 @@ export interface RenderInfo {
   quality: RenderQuality
   /** 实际生效的渲染分辨率倍率 */
   resolution: number
-  /** 自适应缩放系数（相对该档位上限） */
+  /** 自适应缩放系数（auto 档使用） */
   autoScale: number
 }
 
@@ -69,7 +80,6 @@ export class PixiRenderer {
 
   private host: HTMLElement | null = null
   private quality: RenderQuality = 'auto'
-  private resolutionCap = RESOLUTION_CAP.high
   private autoScale = 1
 
   private frames = 0
@@ -126,8 +136,6 @@ export class PixiRenderer {
   setQuality(quality: RenderQuality): void {
     this.quality = quality
     this.autoScale = 1
-    this.resolutionCap =
-      quality === 'auto' ? RESOLUTION_CAP.high : RESOLUTION_CAP[quality]
     this.handleResize()
   }
 
@@ -135,10 +143,15 @@ export class PixiRenderer {
     return this.quality
   }
 
-  /** 当前实际生效的分辨率倍率 */
+  /**
+   * 当前实际生效的分辨率倍率。
+   * - 手动档：dpr × 档位比例（高 1.0 / 均衡 0.75 / 流畅 0.5）
+   * - 自动档：dpr × autoScale（autoScale 随 FPS 在 0.5~1 之间自适应）
+   */
   private effectiveResolution(): number {
     const dpr = window.devicePixelRatio || 1
-    return Math.max(0.5, Math.min(dpr, this.resolutionCap) * this.autoScale)
+    const factor = this.quality === 'auto' ? this.autoScale : RESOLUTION_FACTOR[this.quality]
+    return clamp(dpr * factor, MIN_RESOLUTION, MAX_RESOLUTION)
   }
 
   private handleResize(): void {
