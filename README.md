@@ -121,7 +121,7 @@ docs/design.md   设计说明
 
 分层：`core`（领域内核，无依赖）← `state`（内存事实源）← `render`（PixiJS）/
 `data`（SQLite+OPFS）/ `compute`（图片计算 Worker）← `ui`（页面）。依赖方向单一，
-详见 [设计说明 §2.1](docs/design.md)。
+详见 [设计说明 §2 系统结构](docs/design.md)。
 
 ## 数据模型与版本
 
