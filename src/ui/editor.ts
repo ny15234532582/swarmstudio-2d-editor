@@ -20,6 +20,8 @@ for (const event of [
   'points:add',
   'points:remove',
   'points:color',
+  'points:lock',
+  'groups:change',
   'selection:change',
   'history:change',
   'project:load',
@@ -62,6 +64,18 @@ export const redoLabel = computed(() => {
 export const projectName = computed(() => {
   revision.value
   return editor.project.name
+})
+
+/** 分组列表快照（revision 驱动，供分组面板渲染） */
+export const groups = computed(() => {
+  revision.value
+  return editor.groups.map((g) => ({
+    id: g.id,
+    name: g.name,
+    color: g.color,
+    count: editor.getGroupMemberCount(g.id),
+    locked: editor.isGroupLocked(g.id),
+  }))
 })
 
 export const currentVersion = computed(() => editor.project.version)

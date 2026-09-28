@@ -35,6 +35,24 @@ function createFakeCtx(): { ctx: OperationContext; map: Map<string, Point> } {
         }
       }
     },
+    addGroup() {},
+    removeGroup() {},
+    setGroupIds(entries) {
+      for (const [id, groupId] of entries) {
+        const p = map.get(id)
+        if (!p) continue
+        if (groupId === null) delete p.groupId
+        else p.groupId = groupId
+      }
+    },
+    setLocked(entries) {
+      for (const [id, locked] of entries) {
+        const p = map.get(id)
+        if (!p) continue
+        if (locked) p.locked = true
+        else delete p.locked
+      }
+    },
   }
   return { ctx, map }
 }

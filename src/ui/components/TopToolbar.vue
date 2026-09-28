@@ -55,6 +55,14 @@ function applyColor(): void {
     <div class="divider" />
 
     <div class="group">
+      <button :disabled="selectedCount === 0" @click="editor.groupSelection()">成组</button>
+      <button :disabled="selectedCount === 0" @click="editor.setLockedForSelection(true)">锁定选中</button>
+      <button @click="editor.unlockAll()">解锁全部</button>
+    </div>
+
+    <div class="divider" />
+
+    <div class="group">
       <button :disabled="!canUndo" :title="undoLabel ? `撤销：${undoLabel}` : '撤销'" @click="editor.undo()">
         ↶ 撤销
       </button>

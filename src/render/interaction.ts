@@ -127,7 +127,7 @@ export class InteractionController {
     let bestDist = Infinity
     for (const id of candidates) {
       const p = this.store.getPoint(id)
-      if (!p) continue
+      if (!p || p.locked === true) continue // 锁定点不可命中
       const dx = p.x - world.x
       const dy = p.y - world.y
       const d = dx * dx + dy * dy

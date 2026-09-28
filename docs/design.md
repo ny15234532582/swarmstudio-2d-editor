@@ -114,6 +114,26 @@ EditorStore.events ──────┤        → PixiRenderer 直接调 Pixi 
 - 业务数据 vs 渲染数据使用不同结构：业务是 `Point[]`，渲染是 Sprite Map，
   二者通过事件同步，不共享对象。
 
+### 3.3 分组与锁定
+
+- **分组**：`Group { id, name, color }` + `Point.groupId`。组注册表放在
+  `Project.groups`，点位只存 `groupId` 引用——避免「有归属却查不到组名」的孤儿引用
+  （校验时会丢弃指向不存在分组的 `groupId`）。
+- **锁定**：只放在点位上（`Point.locked`），**组不单独存锁定态**；「锁定整组」
+  就是对组内所有点批量置位。这样只有一个事实来源，不会出现「组锁了但点没锁」。
+  组列表的锁状态由 `isGroupLocked()` 派生（全部组员都已锁定）。
+- **联动规则**（单一入口，避免各处各判）：
+  - `selectMany()` 直接跳过锁定点 → 锁定点**永远进不了选择**，
+    于是拖动 / 删除 / 改色 / 框选 / 套索自然全部排除它；
+  - `pick()`（画布命中）跳过锁定点；
+  - 锁定某个已选中的点时，该点立即移出选择；
+  - 渲染层用 `alpha` 变暗表示锁定（`points:lock` 事件驱动）。
+- **可撤销**：成组 / 取消分组 / 锁定都实现为 `Operation`，与其它操作一致；
+  拆组时同时改动「组注册表」和「点位归属」，二者在同一个 Operation 的
+  apply/revert 内完成，不会半途不一致。
+- **持久化**：组注册表极小，采用**整体覆盖**（`saveGroups`）；点位归属与锁定
+  走 mutation 增量写。刷新后分组与锁定都能恢复。
+
 ## 4. 模块职责（对应 6.2）
 
 | 模块 | 文件 | 职责 |
@@ -163,7 +183,10 @@ type Operation =
   | { kind: 'add';    label; points: Point[] }
   | { kind: 'remove'; label; points: Point[] }
   | { kind: 'move';   label; before: [id,x,y][]; after: [id,x,y][] }
-  | { kind: 'color';  label; ids: string[]; after: RGB; before: [id,r,g,b][] }
+  | { kind: 'color';   label; ids: string[]; after: RGB; before: [id,r,g,b][] }
+  | { kind: 'group';   label; group: Group; members: string[]; before: [id,groupId|null][] }
+  | { kind: 'ungroup'; label; group: Group; members: string[] }
+  | { kind: 'lock';    label; locked: boolean; entries: [id,wasLocked][] }
 ```
 
 优点：可序列化（直接写进 SQLite `history` 表）、可结构化克隆（跨 Worker）、
@@ -299,13 +322,19 @@ PRAGMA foreign_keys = ON;
 PRAGMA user_version;   -- 结构版本，迁移依据
 
 projects(id PK, name, version, created_at, updated_at)
-points(project_id, id, x, y, z, r, g, b, group_id,
+points(project_id, id, x, y, z, r, g, b, group_id, locked,
        PK(project_id,id), FK->projects ON DELETE CASCADE)
 history(project_id, seq, label, op, created_at,
        PK(project_id,seq), FK->projects ON DELETE CASCADE)
+groups(project_id, id, name, color_r, color_g, color_b,
+       PK(project_id,id), FK->projects ON DELETE CASCADE)
 ```
 
-`op` 列存 Operation 的 JSON；`version` 与 `user_version` 分别管数据格式与结构。
+- `op` 列存 Operation 的 JSON；`version` 与 `user_version` 分别管数据格式与结构。
+- 结构升级按版本逐级迁移：**v1 → v2** 用 `ALTER TABLE points ADD COLUMN locked`
+  并新建 `groups` 表，因此旧库能原地升级、旧数据不丢。
+- 写入策略：点位增删移改 / 锁定 / 归属走 mutation 增量写；**分组结构与历史**
+  每次整体覆盖（量小，覆盖更简单且不会出现不一致）。
 
 ### 9.3 VFS 选择
 
@@ -343,15 +372,17 @@ Worker 内还有一层顺序执行循环，确保请求按到达顺序进入事�
 
 ## 11. 测试与验证
 
-- 单元测试（`pnpm test`，40 例）：仓储层在 Node 内存 SQLite 上真实执行 SQL，
+- 单元测试（`pnpm test`，51 例）：仓储层在 Node 内存 SQLite 上真实执行 SQL，
   覆盖迁移、增量写入、历史裁剪、级联删除；队列覆盖串行 / 合并 / 错误隔离；
   `imageProcessor` 覆盖二值化、反相、透明像素、抽稀步长与坐标映射；
-  `geometry` 覆盖套索的点在多边形内判定。
+  `geometry` 覆盖套索的点在多边形内判定；`groups` 覆盖成组/拆组/归属迁移/
+  锁定不可选中且不可删除/撤销重做。
 - 端到端：
   - `pnpm smoke`：无头 Chrome 验证 OPFS(opfs-sahpool) 落盘、20,000 点加载、编辑、
     自动保存、刷新后从 SQLite 重新打开、撤销历史恢复。
   - `pnpm smoke:image`：注入一张图片 → 二值化预览 → 生成点位 → 作为新项目落库。
   - `pnpm smoke:select`：单击选中 → Shift 加选 → 套索圈选 → Shift 套索追加。
+  - `pnpm smoke:groups`：套索圈选 → 成组 → 锁定 → 刷新重开后分组与锁定仍在 → 解锁。
 - 性能观测：界面实时 FPS；无头软件渲染下 20,000 点约 60 FPS
   （关闭 MSAA 前约 28 FPS），真机 GPU 下更高。
 
@@ -376,4 +407,4 @@ Worker 内还有一层顺序执行循环，确保请求按到达顺序进入事�
 
 - 选择 SQLite 换取了结构化与事务能力，代价是引入约 870KB（gzip ~400KB）的 wasm。
 - 选择 `opfs-sahpool` 换取了免 COOP/COEP 与性能，代价是放弃多标签并发。
-- 后续可扩展：分组 / 锁定、图片抖动(halftone)提升观感、点位列式传输、历史压缩策略。
+- 后续可扩展：图片抖动(halftone)提升观感、点位列式传输、历史压缩策略、分组可见性开关。

@@ -40,7 +40,7 @@ describe('repository / schema', () => {
   it('创建项目、列出项目并统计点数', () => {
     const db = createDb()
     repo.insertProject(db, PROJECT)
-    repo.replacePoints(db, PROJECT.id, [point('a'), point('b')], [])
+    repo.replacePoints(db, PROJECT.id, [point('a'), point('b')], [], [])
     const list = repo.listProjects(db)
     expect(list).toHaveLength(1)
     expect(list[0].pointCount).toBe(2)
@@ -50,7 +50,7 @@ describe('repository / schema', () => {
     const db = createDb()
     repo.insertProject(db, PROJECT)
     const history: Operation[] = [{ kind: 'add', label: '新增点', points: [point('a', 1, 2, 3)] }]
-    repo.replacePoints(db, PROJECT.id, [point('a', 1, 2, 3, 4, 5, 6)], history)
+    repo.replacePoints(db, PROJECT.id, [point('a', 1, 2, 3, 4, 5, 6)], history, [])
     const loaded = repo.loadProject(db, PROJECT.id)!
     expect(loaded.project.points[0]).toMatchObject({ id: 'a', x: 1, z: 3, b: 6 })
     expect(loaded.history).toHaveLength(1)
@@ -65,6 +65,7 @@ describe('repository / schema', () => {
       PROJECT.id,
       [{ type: 'add', points: [point('a', 1, 1), point('b', 2, 2)] }],
       [{ kind: 'add', label: '新增点', points: [point('a', 1, 1), point('b', 2, 2)] }],
+      [],
     )
     repo.applyChanges(
       db,
@@ -74,12 +75,13 @@ describe('repository / schema', () => {
         { type: 'color', ids: ['b'], color: { r: 10, g: 20, b: 30 } },
       ],
       [],
+      [],
     )
     let loaded = repo.loadProject(db, PROJECT.id)!
     expect(loaded.project.points.find((p) => p.id === 'a')).toMatchObject({ x: 9, y: 9 })
     expect(loaded.project.points.find((p) => p.id === 'b')).toMatchObject({ r: 10, g: 20, b: 30 })
 
-    repo.applyChanges(db, PROJECT.id, [{ type: 'remove', ids: ['a'] }], [])
+    repo.applyChanges(db, PROJECT.id, [{ type: 'remove', ids: ['a'] }], [], [])
     loaded = repo.loadProject(db, PROJECT.id)!
     expect(loaded.project.points).toHaveLength(1)
     expect(loaded.project.points[0].id).toBe('b')
@@ -103,10 +105,65 @@ describe('repository / schema', () => {
   it('删除项目会级联删除点位与历史', () => {
     const db = createDb()
     repo.insertProject(db, PROJECT)
-    repo.replacePoints(db, PROJECT.id, [point('a')], [{ kind: 'add', label: 'x', points: [point('a')] }])
+    repo.replacePoints(
+      db,
+      PROJECT.id,
+      [point('a')],
+      [{ kind: 'add', label: 'x', points: [point('a')] }],
+      [],
+    )
     repo.deleteProject(db, PROJECT.id)
     expect(repo.loadProject(db, PROJECT.id)).toBeNull()
     expect(Number(db.selectArrays('SELECT COUNT(*) FROM points')[0][0])).toBe(0)
     expect(Number(db.selectArrays('SELECT COUNT(*) FROM history')[0][0])).toBe(0)
+  })
+
+  it('点位锁定状态可持久化', () => {
+    const db = createDb()
+    repo.insertProject(db, PROJECT)
+    repo.replacePoints(
+      db,
+      PROJECT.id,
+      [{ ...point('a'), locked: true }, { ...point('b'), locked: true }],
+      [],
+      [],
+    )
+    // 解锁 b（mutation.entries 表示「设置为该值」）
+    repo.applyChanges(db, PROJECT.id, [{ type: 'setLocked', entries: [['b', false]] }], [], [])
+    const loaded = repo.loadProject(db, PROJECT.id)!
+    expect(loaded.project.points.find((p) => p.id === 'a')?.locked).toBe(true)
+    expect(loaded.project.points.find((p) => p.id === 'b')?.locked).toBeUndefined()
+  })
+
+  it('分组结构与归属可持久化', () => {
+    const db = createDb()
+    repo.insertProject(db, PROJECT)
+    const group = { id: 'g1', name: '机翼', color: { r: 10, g: 20, b: 30 } }
+    repo.replacePoints(db, PROJECT.id, [point('a'), point('b')], [], [group])
+    repo.applyChanges(
+      db,
+      PROJECT.id,
+      [{ type: 'setGroup', entries: [['a', 'g1']] }],
+      [],
+      [group],
+    )
+    const loaded = repo.loadProject(db, PROJECT.id)!
+    expect(loaded.project.groups).toEqual([group])
+    expect(loaded.project.points.find((p) => p.id === 'a')?.groupId).toBe('g1')
+    expect(loaded.project.points.find((p) => p.id === 'b')?.groupId).toBeUndefined()
+
+    // 删除分组后整体覆盖为空
+    repo.applyChanges(db, PROJECT.id, [{ type: 'setGroup', entries: [['a', null]] }], [], [])
+    const after = repo.loadProject(db, PROJECT.id)!
+    expect(after.project.groups).toHaveLength(0)
+    expect(after.project.points.find((p) => p.id === 'a')?.groupId).toBeUndefined()
+  })
+
+  it('分组随项目级联删除', () => {
+    const db = createDb()
+    repo.insertProject(db, PROJECT)
+    repo.replacePoints(db, PROJECT.id, [], [], [{ id: 'g1', name: 'g', color: { r: 1, g: 2, b: 3 } }])
+    repo.deleteProject(db, PROJECT.id)
+    expect(Number(db.selectArrays('SELECT COUNT(*) FROM groups')[0][0])).toBe(0)
   })
 })

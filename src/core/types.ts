@@ -14,7 +14,10 @@ export interface Point {
   r: number
   g: number
   b: number
+  /** 所属分组 id（可选，指向 Project.groups） */
   groupId?: string
+  /** 锁定后不可被选中 / 拖动 / 删除 / 改色，避免误操作 */
+  locked?: boolean
 }
 
 /** RGB 颜色，各通道 0~255 整数。 */
@@ -22,6 +25,14 @@ export interface RGB {
   r: number
   g: number
   b: number
+}
+
+/** 点位分组。锁定打在点上（组锁定 = 批量锁定组内点），因此组本身不重复存锁定态。 */
+export interface Group {
+  id: string
+  name: string
+  /** 组的标识色，仅用于列表展示 */
+  color: RGB
 }
 
 /** 项目元信息与数据。version 用于后续数据格式迁移。 */
@@ -34,10 +45,11 @@ export interface Project {
   createdAt: number
   updatedAt: number
   points: Point[]
+  groups: Group[]
 }
 
-/** 当前支持的项目数据版本 */
-export const PROJECT_VERSION = 1
+/** 当前支持的项目数据版本。v2 起：点位 locked + 分组 groups */
+export const PROJECT_VERSION = 2
 
 /** 项目列表项（不加载完整点位，便于列表展示） */
 export interface ProjectMeta {

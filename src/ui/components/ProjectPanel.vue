@@ -16,6 +16,7 @@ import {
   saving,
 } from '../projects'
 import { projectName } from '../editor'
+import GroupPanel from './GroupPanel.vue'
 
 const newName = ref('')
 const fileInput = ref<HTMLInputElement>()
@@ -61,6 +62,8 @@ function formatTime(ts: number): string {
       </div>
       <p v-if="!opfsSupported" class="warn">当前浏览器不支持 OPFS，存储功能不可用（建议 Chrome/Edge）。</p>
     </div>
+
+    <GroupPanel />
 
     <div class="section">
       <div class="section-title">新建项目</div>

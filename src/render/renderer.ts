@@ -21,6 +21,8 @@ export const POINT_RADIUS = 4
 const TEXTURE_RADIUS = 16
 const RING_RADIUS = POINT_RADIUS + 3
 const RING_TEXTURE_RADIUS = 16
+/** 锁定点的透明度：一眼可辨「不可编辑」 */
+const LOCKED_ALPHA = 0.28
 
 function rgbToHex(r: number, g: number, b: number): number {
   return (r << 16) | (g << 8) | b
@@ -243,6 +245,13 @@ export class PixiRenderer {
           if (p && sprite) sprite.tint = rgbToHex(p.r, p.g, p.b)
         }
       }),
+      events.on('points:lock', ({ ids }) => {
+        for (const id of ids) {
+          const p = this.store.getPoint(id)
+          const sprite = this.sprites.get(id)
+          if (p && sprite) sprite.alpha = p.locked ? LOCKED_ALPHA : 1
+        }
+      }),
       events.on('selection:change', () => this.syncRings()),
     )
   }
@@ -256,6 +265,7 @@ export class PixiRenderer {
     sprite.x = p.x
     sprite.y = p.y
     sprite.tint = rgbToHex(p.r, p.g, p.b)
+    sprite.alpha = p.locked ? LOCKED_ALPHA : 1
     this.sprites.set(p.id, sprite)
     return sprite
   }

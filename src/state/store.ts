@@ -14,14 +14,16 @@
 import { Emitter } from './emitter'
 import { HistoryManager } from './history'
 import { SpatialGrid } from '../core/spatial'
-import { createPoint } from '../core/factory'
+import { createGroup, createPoint } from '../core/factory'
 import type {
+  GroupEntry,
+  LockEntry,
   MoveEntry,
   Mutation,
   Operation,
   OperationContext,
 } from '../core/operations'
-import type { Point, PointInit, PositionUpdate, Project, RGB } from '../core/types'
+import type { Group, Point, PointInit, PositionUpdate, Project, RGB } from '../core/types'
 
 export type EditorEvents = {
   'project:load': undefined
@@ -29,6 +31,10 @@ export type EditorEvents = {
   'points:remove': { ids: string[] }
   'points:move': { ids: string[] }
   'points:color': { ids: string[] }
+  /** 锁定状态变化（渲染层据此调整明暗） */
+  'points:lock': { ids: string[] }
+  /** 分组结构 / 归属变化（UI 列表据此刷新） */
+  'groups:change': undefined
   'selection:change': undefined
   'history:change': undefined
   /** 已提交的数据变更（用于持久化） */
@@ -46,6 +52,7 @@ export class EditorStore {
   readonly events = new Emitter<EditorEvents>()
 
   private pointById = new Map<string, Point>()
+  private groupById = new Map<string, Group>()
   private spatial = new SpatialGrid(64)
   private spatialDirty = true
 
@@ -66,6 +73,18 @@ export class EditorStore {
     setColors: (ids, color) => {
       this.mutateColor(ids, color)
       this.events.emit('mutation', { type: 'color', ids, color })
+    },
+    // 分组结构本身通过 applyChanges 的 groups 快照整体落库；
+    // 点位的归属变化则是点级 mutation
+    addGroup: (group) => this.mutateAddGroup(group),
+    removeGroup: (groupId) => this.mutateRemoveGroup(groupId),
+    setGroupIds: (entries) => {
+      this.mutateSetGroupIds(entries)
+      this.events.emit('mutation', { type: 'setGroup', entries })
+    },
+    setLocked: (entries) => {
+      this.mutateSetLocked(entries)
+      this.events.emit('mutation', { type: 'setLocked', entries })
     },
   }
 
@@ -105,6 +124,9 @@ export class EditorStore {
   private rebuildIndex(): void {
     this.pointById.clear()
     for (const p of this.project.points) this.pointById.set(p.id, p)
+    if (!Array.isArray(this.project.groups)) this.project.groups = []
+    this.groupById.clear()
+    for (const g of this.project.groups) this.groupById.set(g.id, g)
     this.spatialDirty = true
   }
 
@@ -127,6 +149,32 @@ export class EditorStore {
       if (p) result.push(p)
     }
     return result
+  }
+
+  // ---------------------------------------------------------------- 分组
+
+  get groups(): Group[] {
+    return this.project.groups
+  }
+
+  getGroup(id: string): Group | undefined {
+    return this.groupById.get(id)
+  }
+
+  getGroupMembers(groupId: string): Point[] {
+    return this.project.points.filter((p) => p.groupId === groupId)
+  }
+
+  getGroupMemberCount(groupId: string): number {
+    let count = 0
+    for (const p of this.project.points) if (p.groupId === groupId) count++
+    return count
+  }
+
+  /** 组内是否所有点都已锁定（用于 UI 显示组锁状态） */
+  isGroupLocked(groupId: string): boolean {
+    const members = this.getGroupMembers(groupId)
+    return members.length > 0 && members.every((p) => p.locked === true)
   }
 
   // --------------------------------------------------- 低层数据操作（不改历史）
@@ -177,6 +225,44 @@ export class EditorStore {
     this.events.emit('points:color', { ids })
   }
 
+  private mutateAddGroup(group: Group): void {
+    if (this.groupById.has(group.id)) return
+    this.project.groups.push(group)
+    this.groupById.set(group.id, group)
+    this.events.emit('groups:change', undefined)
+  }
+
+  private mutateRemoveGroup(groupId: string): void {
+    this.project.groups = this.project.groups.filter((g) => g.id !== groupId)
+    this.groupById.delete(groupId)
+    this.events.emit('groups:change', undefined)
+  }
+
+  private mutateSetGroupIds(entries: GroupEntry[]): void {
+    for (const [id, groupId] of entries) {
+      const p = this.pointById.get(id)
+      if (!p) continue
+      if (groupId === null) delete p.groupId
+      else p.groupId = groupId
+    }
+    this.events.emit('groups:change', undefined)
+  }
+
+  private mutateSetLocked(entries: LockEntry[]): void {
+    const ids: string[] = []
+    for (const [id, locked] of entries) {
+      const p = this.pointById.get(id)
+      if (!p) continue
+      if (locked) p.locked = true
+      else delete p.locked
+      ids.push(id)
+      // 锁定的点立即移出选择，避免被后续删除/改色影响
+      if (locked) this.selection.delete(id)
+    }
+    this.events.emit('points:lock', { ids })
+    if (ids.length > 0) this.events.emit('selection:change', undefined)
+  }
+
   // ------------------------------------------------------------- 可撤销操作
 
   addPoint(init: PointInit): Point {
@@ -197,7 +283,8 @@ export class EditorStore {
   deletePoints(ids: string[]): void {
     const points = ids
       .map((id) => this.pointById.get(id))
-      .filter((p): p is Point => p !== undefined)
+      // 锁定的点不允许删除
+      .filter((p): p is Point => p !== undefined && p.locked !== true)
     if (points.length === 0) return
     this.history.execute({
       kind: 'remove',
@@ -257,6 +344,78 @@ export class EditorStore {
     this.history.redo()
   }
 
+  // ------------------------------------------------------------ 分组 / 锁定
+
+  /** 把当前选中的点归为一个新组（可撤销） */
+  groupSelection(name?: string): Group | null {
+    if (this.selection.size === 0) return null
+    const members = [...this.selection]
+    const group = createGroup(name ?? `分组 ${this.project.groups.length + 1}`, this.project.groups.length)
+    const before: GroupEntry[] = members.map((id) => [id, this.pointById.get(id)?.groupId ?? null])
+    this.history.execute({ kind: 'group', label: '成组', group, members, before })
+    return group
+  }
+
+  /** 解散一个组：清空组内点的归属并移除该组（可撤销） */
+  ungroup(groupId: string): void {
+    const group = this.groupById.get(groupId)
+    if (!group) return
+    const members = this.getGroupMembers(groupId).map((p) => p.id)
+    this.history.execute({ kind: 'ungroup', label: '取消分组', group, members })
+  }
+
+  renameGroup(groupId: string, name: string): void {
+    const group = this.groupById.get(groupId)
+    if (!group || !name.trim()) return
+    group.name = name.trim()
+    this.events.emit('groups:change', undefined)
+    this.markDirty()
+  }
+
+  /** 批量设置锁定状态（锁定的点会自动移出选择） */
+  setLocked(ids: string[], locked: boolean): void {
+    const entries: LockEntry[] = []
+    for (const id of ids) {
+      const p = this.pointById.get(id)
+      if (!p) continue
+      if ((p.locked === true) === locked) continue
+      entries.push([id, p.locked === true])
+    }
+    if (entries.length === 0) return
+    this.history.execute({
+      kind: 'lock',
+      label: locked ? '锁定点位' : '解锁点位',
+      locked,
+      entries,
+    })
+  }
+
+  setLockedForSelection(locked: boolean): void {
+    if (this.selection.size === 0) return
+    this.setLocked([...this.selection], locked)
+  }
+
+  /** 组锁定 = 批量锁定组内所有点 */
+  setLockedForGroup(groupId: string, locked: boolean): void {
+    const ids = this.getGroupMembers(groupId).map((p) => p.id)
+    this.setLocked(ids, locked)
+  }
+
+  /** 解锁全部锁定点 */
+  unlockAll(): void {
+    const ids: string[] = []
+    for (const p of this.project.points) if (p.locked) ids.push(p.id)
+    this.setLocked(ids, false)
+  }
+
+  /** 选中某个组的所有未锁定点 */
+  selectGroup(groupId: string, mode: SelectMode = 'replace'): void {
+    this.selectMany(
+      this.getGroupMembers(groupId).map((p) => p.id),
+      mode,
+    )
+  }
+
   // ---------------------------------------------------------------- 选中
 
   select(id: string, mode: SelectMode = 'replace'): void {
@@ -266,6 +425,9 @@ export class EditorStore {
   selectMany(ids: string[], mode: SelectMode = 'replace'): void {
     if (mode === 'replace') this.selection.clear()
     for (const id of ids) {
+      const p = this.pointById.get(id)
+      // 锁定点永远不可选（因此也不会被拖动/删除/改色）
+      if (!p || p.locked === true) continue
       if (mode === 'toggle' && this.selection.has(id)) this.selection.delete(id)
       else this.selection.add(id)
     }

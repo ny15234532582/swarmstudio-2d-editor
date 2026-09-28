@@ -12,12 +12,16 @@
  *
  * 约定：label 用于 UI 展示（如「移动点位」）。
  */
-import type { Point, PositionUpdate, RGB } from './types'
+import type { Group, Point, PositionUpdate, RGB } from './types'
 
 /** 移动：只存 id → 坐标的增量，避免整份快照 */
 export type MoveEntry = [id: string, x: number, y: number]
 /** 颜色：id → rgb */
 export type ColorEntry = [id: string, r: number, g: number, b: number]
+/** 分组归属：id → groupId（null 表示不属于任何组） */
+export type GroupEntry = [id: string, groupId: string | null]
+/** 锁定状态：id → locked */
+export type LockEntry = [id: string, locked: boolean]
 
 /** 历史栈深度上限，同时也是 SQLite history 表保留的最近记录条数 */
 export const HISTORY_LIMIT = 100
@@ -27,6 +31,12 @@ export type Operation =
   | { kind: 'remove'; label: string; points: Point[] }
   | { kind: 'move'; label: string; before: MoveEntry[]; after: MoveEntry[] }
   | { kind: 'color'; label: string; ids: string[]; after: RGB; before: ColorEntry[] }
+  /** 成组：新建 group，并把 members 归入该组；before 记录各自原属组 */
+  | { kind: 'group'; label: string; group: Group; members: string[]; before: GroupEntry[] }
+  /** 取消分组：移除 group 并清空 members 的归属 */
+  | { kind: 'ungroup'; label: string; group: Group; members: string[] }
+  /** 锁定 / 解锁：entries 为各自修改前的状态 */
+  | { kind: 'lock'; label: string; locked: boolean; entries: LockEntry[] }
 
 /**
  * 数据操作层的低层接口。EditorStore 实现它，Operation 只依赖这个接口，
@@ -37,6 +47,10 @@ export interface OperationContext {
   removePoints(ids: string[]): void
   setPositions(updates: PositionUpdate[]): void
   setColors(ids: string[], color: RGB): void
+  addGroup(group: Group): void
+  removeGroup(groupId: string): void
+  setGroupIds(entries: GroupEntry[]): void
+  setLocked(entries: LockEntry[]): void
 }
 
 function entriesToUpdates(entries: MoveEntry[]): PositionUpdate[] {
@@ -56,6 +70,17 @@ export function applyOperation(ctx: OperationContext, op: Operation): void {
       break
     case 'color':
       ctx.setColors(op.ids, op.after)
+      break
+    case 'group':
+      ctx.addGroup(op.group)
+      ctx.setGroupIds(op.members.map((id) => [id, op.group.id]))
+      break
+    case 'ungroup':
+      ctx.setGroupIds(op.members.map((id) => [id, null]))
+      ctx.removeGroup(op.group.id)
+      break
+    case 'lock':
+      ctx.setLocked(op.entries.map(([id]) => [id, op.locked]))
       break
   }
 }
@@ -86,6 +111,17 @@ export function revertOperation(ctx: OperationContext, op: Operation): void {
       }
       break
     }
+    case 'group':
+      ctx.setGroupIds(op.before)
+      ctx.removeGroup(op.group.id)
+      break
+    case 'ungroup':
+      ctx.addGroup(op.group)
+      ctx.setGroupIds(op.members.map((id) => [id, op.group.id]))
+      break
+    case 'lock':
+      ctx.setLocked(op.entries)
+      break
   }
 }
 
@@ -101,3 +137,5 @@ export type Mutation =
   | { type: 'remove'; ids: string[] }
   | { type: 'move'; updates: PositionUpdate[] }
   | { type: 'color'; ids: string[]; color: RGB }
+  | { type: 'setGroup'; entries: GroupEntry[] }
+  | { type: 'setLocked'; entries: LockEntry[] }

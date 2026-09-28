@@ -2,7 +2,7 @@
  * 数据校验。用于 OPFS 读取、JSON 导入等所有「外部数据进入系统」的入口。
  * 原则：宁可明确报错，也不让脏数据进入事实源。
  */
-import { PROJECT_VERSION, type Point, type Project } from './types'
+import { PROJECT_VERSION, type Group, type Point, type Project } from './types'
 
 export class DataValidationError extends Error {
   constructor(message: string) {
@@ -36,6 +36,9 @@ export function validatePoint(input: unknown, index: number): Point {
   if (p.groupId !== undefined && typeof p.groupId !== 'string') {
     throw new DataValidationError(`点 ${p.id} 的 groupId 必须是字符串`)
   }
+  if (p.locked !== undefined && typeof p.locked !== 'boolean') {
+    throw new DataValidationError(`点 ${p.id} 的 locked 必须是布尔值`)
+  }
   const point: Point = {
     id: p.id,
     x: p.x,
@@ -46,7 +49,31 @@ export function validatePoint(input: unknown, index: number): Point {
     b: p.b,
   }
   if (p.groupId !== undefined) point.groupId = p.groupId as string
+  if (p.locked === true) point.locked = true
   return point
+}
+
+export function validateGroup(input: unknown, index: number): Group {
+  if (typeof input !== 'object' || input === null) {
+    throw new DataValidationError(`第 ${index} 个分组不是对象`)
+  }
+  const g = input as Record<string, unknown>
+  if (typeof g.id !== 'string' || g.id.length === 0) {
+    throw new DataValidationError(`第 ${index} 个分组缺少合法的 id`)
+  }
+  if (typeof g.name !== 'string') {
+    throw new DataValidationError(`分组 ${g.id} 缺少 name`)
+  }
+  const color = (g.color ?? {}) as Record<string, unknown>
+  return {
+    id: g.id,
+    name: g.name,
+    color: {
+      r: isByte(color.r) ? color.r : 54,
+      g: isByte(color.g) ? color.g : 198,
+      b: isByte(color.b) ? color.b : 255,
+    },
+  }
 }
 
 export function validateProject(input: unknown): Project {
@@ -80,12 +107,22 @@ export function validateProject(input: unknown): Project {
     seen.add(point.id)
     return point
   })
+  // v1 项目没有 groups 字段，这里按空数组归一化（即内存中的数据格式迁移）
+  const groups: Group[] = Array.isArray(raw.groups)
+    ? raw.groups.map((item, i) => validateGroup(item, i))
+    : []
+  const groupIds = new Set(groups.map((g) => g.id))
+  for (const point of points) {
+    // 丢弃指向不存在分组的 groupId，避免出现孤儿引用
+    if (point.groupId && !groupIds.has(point.groupId)) delete point.groupId
+  }
   return {
-    version: raw.version,
+    version: PROJECT_VERSION,
     id: raw.id,
     name: raw.name,
     createdAt: isFiniteNumber(raw.createdAt) ? raw.createdAt : Date.now(),
     updatedAt: isFiniteNumber(raw.updatedAt) ? raw.updatedAt : Date.now(),
     points,
+    groups,
   }
 }
