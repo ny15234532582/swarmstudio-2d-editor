@@ -11,6 +11,7 @@
  */
 import type { Database } from '@sqlite.org/sqlite-wasm'
 
+/** 当前数据库结构版本；项目数据格式版本另存于 projects.version */
 export const SCHEMA_VERSION = 2
 
 /** v1：基础结构（全部 IF NOT EXISTS，可安全重复执行） */
@@ -66,6 +67,7 @@ CREATE TABLE IF NOT EXISTS groups (
 /** v2：点位锁定列（ALTER 不支持 IF NOT EXISTS，需先探测） */
 const DDL_V2_LOCKED_COLUMN = 'ALTER TABLE points ADD COLUMN locked INTEGER NOT NULL DEFAULT 0'
 
+/** 读取 PRAGMA user_version；SQLite 默认返回 0，表示尚未迁移过 */
 function readUserVersion(db: Database): number {
   const row = db.selectArrays('PRAGMA user_version')[0]
   return row ? Number(row[0]) : 0
@@ -77,7 +79,12 @@ export function hasColumn(db: Database, table: string, column: string): boolean 
   return rows.some((r) => String(r[1]) === column)
 }
 
+/**
+ * 幂等迁移：先无条件建 v1 基础表，再按**真实结构探测**补齐 v2 的列与表，
+ * 完全不依赖 user_version 是否正确（自愈），最后才更新版本号。
+ */
 export function migrate(db: Database): void {
+  // 外键必须每个连接单独开启，否则 ON DELETE CASCADE 不生效
   db.exec('PRAGMA foreign_keys = ON')
   const current = readUserVersion(db)
 

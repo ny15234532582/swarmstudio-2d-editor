@@ -8,9 +8,15 @@
  */
 export type Listener<T> = (payload: T) => void
 
+/**
+ * 泛型事件总线。Events 是「事件名 → payload 类型」的映射，
+ * 让 on/emit 的 payload 在编译期获得完整类型约束。
+ */
 export class Emitter<Events extends Record<string, unknown>> {
+  /** 事件名 → 监听器集合；用 Set 天然去重且便于 O(1) 注销 */
   private listeners = new Map<keyof Events, Set<Listener<unknown>>>()
 
+  /** 订阅事件，返回「取消订阅」函数（便于组件卸载时清理，避免内存泄漏） */
   on<K extends keyof Events>(event: K, listener: Listener<Events[K]>): () => void {
     let set = this.listeners.get(event)
     if (!set) {
@@ -21,6 +27,7 @@ export class Emitter<Events extends Record<string, unknown>> {
     return () => set!.delete(listener as Listener<unknown>)
   }
 
+  /** 同步派发；无监听者时直接返回。注意：派发过程中修改监听器集合的行为未定义 */
   emit<K extends keyof Events>(event: K, payload: Events[K]): void {
     const set = this.listeners.get(event)
     if (!set) return
@@ -29,6 +36,7 @@ export class Emitter<Events extends Record<string, unknown>> {
     }
   }
 
+  /** 清空全部监听器（销毁时调用） */
   clear(): void {
     this.listeners.clear()
   }

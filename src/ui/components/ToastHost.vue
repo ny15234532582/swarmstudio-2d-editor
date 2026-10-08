@@ -1,10 +1,17 @@
 <script setup lang="ts">
+/**
+ * Toast 展示宿主：订阅全局 toasts 列表并渲染。
+ *
+ * 只做展示与交互（点击关闭），提示的创建/超时由 ui/toast 负责；
+ * TransitionGroup 让新增/移除带有滑入滑出动画。
+ */
 import { dismiss, toasts } from '../toast'
 </script>
 
 <template>
   <div class="toast-host">
     <TransitionGroup name="toast">
+      <!-- 以 id 作为 key：保证动画与列表项一一对应 -->
       <div v-for="t in toasts" :key="t.id" class="toast" :class="t.type" @click="dismiss(t.id)">
         <span class="icon">{{ t.type === 'error' ? '⚠' : t.type === 'success' ? '✓' : 'ℹ' }}</span>
         <span>{{ t.message }}</span>

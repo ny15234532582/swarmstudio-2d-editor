@@ -15,42 +15,50 @@ import type { LoadedProject, ProjectRecord } from './protocol'
 
 type Row = Array<number | string | null | Uint8Array>
 
+// sqlite-wasm 返回的行是弱类型数组，这里做统一的取值归一化
 function num(v: unknown): number {
   return typeof v === 'number' ? v : Number(v)
 }
 function str(v: unknown): string {
   return v == null ? '' : String(v)
 }
+// SQLite 没有布尔类型，locked 以 0/1 存储，需兼容数字/字符串两种读回形式
 function isTrue(v: unknown): boolean {
   return v === 1 || v === true || v === '1'
 }
 
+// 点位表列名与占位符集中定义，保证写入顺序与 bindPoint 一致
 const POINT_COLUMNS = 'project_id,id,x,y,z,r,g,b,group_id,locked'
 const POINT_PLACEHOLDERS = '?,?,?,?,?,?,?,?,?,?'
 
+/** 把单个点位绑定到已 prepare 的插入/替换语句并复位，供批量复用 */
 function bindPoint(stmt: PreparedStatement, projectId: string, p: Point): void {
   stmt
     .bind([projectId, p.id, p.x, p.y, p.z, p.r, p.g, p.b, p.groupId ?? null, p.locked ? 1 : 0])
     .stepReset()
 }
 
+/** 插入一条项目元信息（点位/历史/分组随后单独写） */
 export function insertProject(db: Database, project: ProjectRecord): void {
   db.prepare('INSERT INTO projects(id,name,version,created_at,updated_at) VALUES(?,?,?,?,?)')
     .bind([project.id, project.name, project.version, project.createdAt, project.updatedAt])
     .stepFinalize()
 }
 
+/** 重命名项目并刷新 updated_at，使其在列表中排到最前 */
 export function renameProject(db: Database, projectId: string, name: string): void {
   db.prepare('UPDATE projects SET name = ?, updated_at = ? WHERE id = ?')
     .bind([name, Date.now(), projectId])
     .stepFinalize()
 }
 
+/** 删除项目；points / history / groups 依靠外键级联一并清除 */
 export function deleteProject(db: Database, projectId: string): void {
   // points / history / groups 通过外键 ON DELETE CASCADE 一起清除
   db.prepare('DELETE FROM projects WHERE id = ?').bind([projectId]).stepFinalize()
 }
 
+/** 项目摘要列表：JOIN 统计点位数，按最近更新倒序 */
 export function listProjects(db: Database): ProjectMeta[] {
   const rows = db.selectArrays(
     `SELECT p.id, p.name, p.version, p.created_at, p.updated_at, COUNT(pt.id)
@@ -69,6 +77,7 @@ export function listProjects(db: Database): ProjectMeta[] {
   }))
 }
 
+/** 读取点位，按插入顺序（rowid）返回；group_id/locked 为空时不写该字段 */
 function readPoints(db: Database, projectId: string): Point[] {
   const rows = db.selectArrays(
     'SELECT id,x,y,z,r,g,b,group_id,locked FROM points WHERE project_id = ? ORDER BY rowid ASC',
@@ -90,6 +99,7 @@ function readPoints(db: Database, projectId: string): Point[] {
   })
 }
 
+/** 读取分组，颜色由三列整数重新组装成 RGB 对象 */
 function readGroups(db: Database, projectId: string): Group[] {
   const rows = db.selectArrays(
     'SELECT id,name,color_r,color_g,color_b FROM groups WHERE project_id = ? ORDER BY rowid ASC',
@@ -102,6 +112,7 @@ function readGroups(db: Database, projectId: string): Group[] {
   }))
 }
 
+/** 读取历史；单条 JSON 损坏时跳过，避免整份历史无法加载 */
 function readHistory(db: Database, projectId: string): Operation[] {
   const rows = db.selectArrays(
     'SELECT op FROM history WHERE project_id = ? ORDER BY seq ASC',
@@ -118,6 +129,7 @@ function readHistory(db: Database, projectId: string): Operation[] {
   return ops
 }
 
+/** 加载完整项目；项目不存在返回 null */
 export function loadProject(db: Database, projectId: string): LoadedProject | null {
   const rows = db.selectArrays(
     'SELECT id,name,version,created_at,updated_at FROM projects WHERE id = ?',
@@ -139,6 +151,10 @@ export function loadProject(db: Database, projectId: string): LoadedProject | nu
   }
 }
 
+/**
+ * 覆盖保存历史：先清空再整体重写，只保留最近 HISTORY_LIMIT(=100) 条，
+ * 与内存历史栈的深度上限保持一致。
+ */
 export function saveHistory(db: Database, projectId: string, ops: Operation[]): void {
   db.prepare('DELETE FROM history WHERE project_id = ?').bind([projectId]).stepFinalize()
   const recent = ops.slice(-HISTORY_LIMIT)
@@ -166,9 +182,11 @@ export function saveGroups(db: Database, projectId: string, groups: Group[]): vo
   stmt.finalize()
 }
 
+/** 应用单条 mutation：点级增删移改/改色/分组/锁定，均为增量 SQL */
 function applyMutation(db: Database, projectId: string, mutation: Mutation): void {
   switch (mutation.type) {
     case 'add': {
+      // 用 INSERT OR REPLACE：导入/重做时同 id 点位可安全覆盖
       const stmt = db.prepare(
         `INSERT OR REPLACE INTO points(${POINT_COLUMNS}) VALUES(${POINT_PLACEHOLDERS})`,
       )
@@ -183,12 +201,14 @@ function applyMutation(db: Database, projectId: string, mutation: Mutation): voi
       break
     }
     case 'move': {
+      // 只更新平面坐标 x/y，z 与颜色不变
       const stmt = db.prepare('UPDATE points SET x = ?, y = ? WHERE project_id = ? AND id = ?')
       for (const u of mutation.updates) stmt.bind([u.x, u.y, projectId, u.id]).stepReset()
       stmt.finalize()
       break
     }
     case 'color': {
+      // 同一条语句批量改色，颜色对所有 id 相同
       const stmt = db.prepare(
         'UPDATE points SET r = ?, g = ?, b = ? WHERE project_id = ? AND id = ?',
       )
@@ -199,6 +219,7 @@ function applyMutation(db: Database, projectId: string, mutation: Mutation): voi
       break
     }
     case 'setGroup': {
+      // group_id 允许为 null，表示移出分组
       const stmt = db.prepare('UPDATE points SET group_id = ? WHERE project_id = ? AND id = ?')
       for (const [id, groupId] of mutation.entries) {
         stmt.bind([groupId, projectId, id]).stepReset()
@@ -217,6 +238,7 @@ function applyMutation(db: Database, projectId: string, mutation: Mutation): voi
   }
 }
 
+/** 更新项目的 updated_at，使最近修改的项目排到列表最前 */
 function touchProject(db: Database, projectId: string): void {
   db.prepare('UPDATE projects SET updated_at = ? WHERE id = ?')
     .bind([Date.now(), projectId])

@@ -6,6 +6,7 @@ import { validateProject } from '../core/validation'
 import { DataValidationError } from '../core/validation'
 import type { Project } from '../core/types'
 
+/** 导入专用错误：统一携带面向用户的中文说明 */
 export class ImportError extends Error {
   constructor(message: string) {
     super(message)
@@ -13,6 +14,7 @@ export class ImportError extends Error {
   }
 }
 
+/** 生成并触发浏览器下载：JSON 缩进 2 空格，文件名取项目名 */
 export function exportProjectJson(project: Project): void {
   const blob = new Blob([JSON.stringify(project, null, 2)], { type: 'application/json' })
   const url = URL.createObjectURL(blob)
@@ -22,9 +24,14 @@ export function exportProjectJson(project: Project): void {
   document.body.appendChild(anchor)
   anchor.click()
   anchor.remove()
+  // 下载已触发，释放对象 URL 防止内存泄漏
   URL.revokeObjectURL(url)
 }
 
+/**
+ * 读取并解析导入文件，按「读取 → JSON 解析 → 结构校验」三步分别报错；
+ * 通过 validateProject 的数据才会返回，保证脏数据不进入系统。
+ */
 export async function parseProjectFile(file: File): Promise<Project> {
   let text: string
   try {
@@ -41,6 +48,7 @@ export async function parseProjectFile(file: File): Promise<Project> {
   try {
     return validateProject(parsed)
   } catch (err) {
+    // 结构校验错误转为可直接展示的 ImportError；其余错误原样抛出
     if (err instanceof DataValidationError) throw new ImportError(`导入失败：${err.message}`)
     throw err
   }

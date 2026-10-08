@@ -19,6 +19,7 @@ interface Pending {
   reject: (error: Error) => void
 }
 
+/** 数据访问入口：类型化 API + 以请求 id 为键的 Promise 配对表 */
 export class DataClient {
   private readonly worker: Worker
   private readonly pending = new Map<number, Pending>()
@@ -29,11 +30,13 @@ export class DataClient {
   constructor() {
     this.worker = new Worker(new URL('./worker.ts', import.meta.url), { type: 'module' })
     this.worker.onmessage = (event: MessageEvent<Response>) => this.onMessage(event.data)
+    // Worker 级错误无法定位到具体请求，全部 reject 并清空，避免 Promise 永久挂起
     this.worker.onerror = (event) => {
       const error = new Error(`数据 Worker 错误：${event.message || '未知错误'}`)
       for (const entry of this.pending.values()) entry.reject(error)
       this.pending.clear()
     }
+    // 构造即自动发起 init，后续请求在队列中排在它之后
     this.initPromise = this.send('init', {})
   }
 
@@ -42,6 +45,7 @@ export class DataClient {
     return this.initPromise
   }
 
+  /** 按 id 找到等待者并结算：成功 resolve(result)，失败 reject(error) */
   private onMessage(response: Response): void {
     const entry = this.pending.get(response.id)
     if (!entry) return
@@ -51,6 +55,7 @@ export class DataClient {
   }
 
  /** 把请求交给队列，队列保证串行执行 */
+  /** 真正发消息：先登记 id → Promise，再 postMessage，等 onMessage 回包 */
   private dispatch(request: Request): Promise<unknown> {
     return new Promise((resolve, reject) => {
       this.pending.set(request.id, { resolve, reject })
@@ -58,6 +63,7 @@ export class DataClient {
     })
   }
 
+  /** 生成带 id 的请求，经 TaskQueue 串行执行（不合并） */
   private send<K extends keyof ResultTypes>(type: K, params: object = {}): Promise<ResultTypes[K]> {
     const request = { id: this.nextId++, type, ...params } as Request
     return this.queue.enqueue<ResultTypes[K], Request>({
@@ -74,6 +80,7 @@ export class DataClient {
     return this.send('loadProject', { projectId })
   }
 
+  /** 只读取项目，与 loadProject 同义（便于区分「打开」与「拉取」两种调用意图） */
   getProject(projectId: string): Promise<LoadedProject | null> {
     return this.send('getProject', { projectId })
   }
@@ -115,6 +122,7 @@ export class DataClient {
       key: `changes:${projectId}`,
       payload: { mutations, history, groups },
       merge: (prev, next) => ({
+        // mutation 累加；history/groups 是快照，后到的整体覆盖即可
         mutations: [...prev.mutations, ...next.mutations],
         history: next.history,
         groups: next.groups,
@@ -131,6 +139,7 @@ export class DataClient {
     })
   }
 
+  /** 终止 Worker 并清空等待表；调用后本实例不可再用 */
   destroy(): void {
     this.worker.terminate()
     this.pending.clear()

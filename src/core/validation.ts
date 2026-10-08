@@ -11,14 +11,20 @@ export class DataValidationError extends Error {
   }
 }
 
+/** 有限数值校验：排除 NaN / Infinity（JSON 反序列化后仍可能为 null 等非数值） */
 function isFiniteNumber(v: unknown): v is number {
   return typeof v === 'number' && Number.isFinite(v)
 }
 
+/** 颜色分量校验：0~255 的整数 */
 function isByte(v: unknown): v is number {
   return typeof v === 'number' && Number.isInteger(v) && v >= 0 && v <= 255
 }
 
+/**
+ * 校验并归一化单个点。
+ * 返回的是「重建后的干净对象」而非入参，避免把多余字段带进事实源。
+ */
 export function validatePoint(input: unknown, index: number): Point {
   if (typeof input !== 'object' || input === null) {
     throw new DataValidationError(`第 ${index} 个点不是对象`)
@@ -48,11 +54,13 @@ export function validatePoint(input: unknown, index: number): Point {
     g: p.g,
     b: p.b,
   }
+  // 可选字段只在「确有意义」时写入：locked 仅保留 true（false 等价于缺省）
   if (p.groupId !== undefined) point.groupId = p.groupId as string
   if (p.locked === true) point.locked = true
   return point
 }
 
+/** 校验并归一化分组；颜色非法时回退到默认蓝，尽量不因单个分组损坏整体导入 */
 export function validateGroup(input: unknown, index: number): Group {
   if (typeof input !== 'object' || input === null) {
     throw new DataValidationError(`第 ${index} 个分组不是对象`)
@@ -76,6 +84,11 @@ export function validateGroup(input: unknown, index: number): Group {
   }
 }
 
+/**
+ * 校验整个项目。
+ * 版本策略：低于当前版本允许（由后续迁移/归一化补齐），高于当前版本明确报错，
+ * 防止新版字段被旧应用静默丢弃。
+ */
 export function validateProject(input: unknown): Project {
   if (typeof input !== 'object' || input === null) {
     throw new DataValidationError('项目数据不是对象')
@@ -101,6 +114,7 @@ export function validateProject(input: unknown): Project {
   const seen = new Set<string>()
   const points = raw.points.map((item, i) => {
     const point = validatePoint(item, i)
+    // 重复 id 会破坏 id → Point 索引（后写覆盖先写），必须在入口拦截
     if (seen.has(point.id)) {
       throw new DataValidationError(`存在重复的点位 id: ${point.id}`)
     }

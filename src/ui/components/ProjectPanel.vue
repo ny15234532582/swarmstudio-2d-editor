@@ -1,4 +1,11 @@
 <script setup lang="ts">
+/**
+ * 左侧项目面板：当前项目信息、分组面板、新建项目、OPFS 项目列表。
+ *
+ * 所有持久化相关的状态与动作都来自 ui/projects 桥接层；本组件只负责触发
+ * 与呈现。切换/导入项目时，projects 层内部处理「未保存修改」的确认流程，
+ * 因此这里无需自行弹确认框，只需 await 返回结果。
+ */
 import { ref } from 'vue'
 import {
   createNewProject,
@@ -18,18 +25,23 @@ import {
 import { projectName } from '../editor'
 import GroupPanel from './GroupPanel.vue'
 
+// 新建项目的名称输入（空则回退为默认名）
 const newName = ref('')
+// 隐藏的文件选择框，供「导入 JSON」按钮间接触发
 const fileInput = ref<HTMLInputElement>()
 
+/** 创建新项目：空名称使用默认名，成功后清空输入框 */
 async function onCreate(): Promise<void> {
   await createNewProject(newName.value || '未命名项目')
   newName.value = ''
 }
 
+/** 触发隐藏的 file input（浏览器要求由用户手势直接触发点击） */
 function pickFile(): void {
   fileInput.value?.click()
 }
 
+/** 处理选中的 JSON 文件并导入；无论成功与否都重置 input，便于重复选择同一文件 */
 async function onFileChange(e: Event): Promise<void> {
   const input = e.target as HTMLInputElement
   const file = input.files?.[0]
@@ -37,6 +49,7 @@ async function onFileChange(e: Event): Promise<void> {
   input.value = ''
 }
 
+/** 时间戳格式化；0/无效值显示占位符 */
 function formatTime(ts: number): string {
   if (!ts) return '-'
   return new Date(ts).toLocaleString('zh-CN', { hour12: false })
@@ -45,6 +58,7 @@ function formatTime(ts: number): string {
 
 <template>
   <aside class="panel">
+    <!-- 区域：当前项目 —— 名称/脏标记 + 保存/导出/导入操作 -->
     <div class="section">
       <div class="section-title">当前项目</div>
       <div class="current">
@@ -63,8 +77,10 @@ function formatTime(ts: number): string {
       <p v-if="!opfsSupported" class="warn">当前浏览器不支持 OPFS，存储功能不可用（建议 Chrome/Edge）。</p>
     </div>
 
+    <!-- 区域：分组管理（独立子组件） -->
     <GroupPanel />
 
+    <!-- 区域：新建项目 -->
     <div class="section">
       <div class="section-title">新建项目</div>
       <div class="actions">
@@ -73,6 +89,7 @@ function formatTime(ts: number): string {
       </div>
     </div>
 
+    <!-- 区域：OPFS 项目列表（可滚动，点击打开、✕ 删除） -->
     <div class="section grow">
       <div class="section-title">
         OPFS 项目列表

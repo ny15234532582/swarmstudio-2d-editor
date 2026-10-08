@@ -22,9 +22,14 @@ export class SpatialGrid {
     return (cx & 0xffff) * 0x10000 + (cy & 0xffff)
   }
 
+  /**
+   * 用当前点集重建索引。O(n)：一次遍历把每个点 id 放进其所在网格。
+   * 索引只存 id，不存 Point 引用，避免持有业务对象造成内存泄漏。
+   */
   rebuild(points: Point[]): void {
     this.cells.clear()
     for (const p of points) {
+      // 世界坐标 → 网格坐标（向下取整，负坐标也正确落入相邻格）
       const cx = Math.floor(p.x / this.cellSize)
       const cy = Math.floor(p.y / this.cellSize)
       const k = this.key(cx, cy)
@@ -37,7 +42,11 @@ export class SpatialGrid {
     }
   }
 
-  /** 查询给定世界坐标半径内可能命中的点 id（粗筛，不做精确距离判断） */
+  /**
+   * 查询给定世界坐标半径内可能命中的点 id（粗筛，不做精确距离判断）。
+   * 半径先外扩为轴对齐方框覆盖的网格范围，再取这些格里的所有点：
+   * 结果是候选超集，调用方仍需做一次精确距离过滤。
+   */
   queryCircle(x: number, y: number, radius: number): string[] {
     const result: string[] = []
     const minX = Math.floor((x - radius) / this.cellSize)
@@ -53,7 +62,7 @@ export class SpatialGrid {
     return result
   }
 
-  /** 查询与矩形相交的网格内所有点 id（框选粗筛） */
+  /** 查询与矩形相交的网格内所有点 id（框选粗筛，结果为候选超集） */
   queryRect(rect: Rect): string[] {
     const minX = Math.floor(rect.x / this.cellSize)
     const maxX = Math.floor((rect.x + rect.width) / this.cellSize)

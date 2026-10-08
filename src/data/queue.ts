@@ -26,9 +26,11 @@ interface QueueItem {
   payload: unknown
   merge?: (prev: unknown, next: unknown) => unknown
   run: (p: unknown) => Promise<unknown>
+  /** 被合并进来的每个 enqueue 都挂一个 resolver，随本次 run 的结果一起结算 */
   resolvers: Array<{ resolve: (v: unknown) => void; reject: (e: unknown) => void }>
 }
 
+/** 串行 + 同 key 合并的任务队列，与具体传输（postMessage）解耦，便于测试 */
 export class TaskQueue {
   private items: QueueItem[] = []
   private inflight = 0
@@ -38,6 +40,11 @@ export class TaskQueue {
     this.concurrency = concurrency
   }
 
+  /**
+   * 入队。若指定 key 且队首存在同 key 的待执行任务，
+   * 则调用其 merge 合并负载，并把本次 Promise 挂到同一个任务上，
+   * 从而让多次调度只产生一次实际执行。
+   */
   enqueue<T, P>(options: TaskOptions<T, P>): Promise<T> {
     if (options.key !== undefined) {
       const existing = this.items.find((item) => item.key === options.key)
@@ -68,6 +75,7 @@ export class TaskQueue {
     return this.items.length
   }
 
+  /** 取队首任务执行，维持不超过 concurrency 个在途；完成后继续泵送 */
   private pump(): void {
     while (this.inflight < this.concurrency && this.items.length > 0) {
       const item = this.items.shift()!
@@ -75,9 +83,11 @@ export class TaskQueue {
       item
         .run(item.payload)
         .then((result) => {
+          // 合并任务的所有等待者共享同一执行结果
           for (const r of item.resolvers) r.resolve(result)
         })
         .catch((error) => {
+          // 失败只影响本任务；下一个任务继续执行
           for (const r of item.resolvers) r.reject(error)
         })
         .finally(() => {

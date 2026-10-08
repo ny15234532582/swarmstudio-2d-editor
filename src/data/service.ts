@@ -39,6 +39,7 @@ export type ServiceEvents = {
 
 const AUTOSAVE_DELAY = 400
 
+/** 从运行时 Project 中抽出只用于项目表的元信息字段 */
 function toRecord(project: Project) {
   return {
     id: project.id,
@@ -49,6 +50,10 @@ function toRecord(project: Project) {
   }
 }
 
+/**
+ * 数据服务门面：UI 只与它交互，它负责编排 DataClient、EditorStore 与导入导出，
+ * 并对外广播 status / projects / info / error 事件。
+ */
 export class DataService {
   readonly events = new Emitter<ServiceEvents>()
   private readonly client = new DataClient()
@@ -66,6 +71,7 @@ export class DataService {
 
   private pendingMutations: Mutation[] = []
   private flushTimer: number | null = null
+  /** 打开/新建项目时置位，屏蔽 store 回灌产生的事件，避免误触发自动保存 */
   private suppress = false
   /** 是否有待落盘的变更（可能是 mutation，也可能只有分组结构/历史变化） */
   private pending = false
@@ -93,15 +99,18 @@ export class DataService {
   }
 
   private onVisibilityChange = (): void => {
+    // 切到后台可能被系统回收，立即落盘
     if (document.visibilityState === 'hidden') void this.flush()
   }
 
   private onPageHide = (): void => {
+    // 关闭 / 刷新页面时最后一搏
     void this.flush()
   }
 
   // ------------------------------------------------------------- 生命周期
 
+  /** 等待 Worker 就绪，同步存储后端状态并拉取项目列表 */
   async init(): Promise<void> {
     let info: WorkerInitInfo
     try {
@@ -120,10 +129,12 @@ export class DataService {
     await this.refreshProjects()
   }
 
+  /** 返回状态快照（拷贝，防止外部直接改内部状态） */
   getStatus(): DataStatus {
     return { ...this.status }
   }
 
+  /** 以 patch 合并方式更新状态并广播 status 事件 */
   private patchStatus(patch: Partial<DataStatus>): void {
     this.status = { ...this.status, ...patch }
     this.events.emit('status', this.getStatus())
@@ -147,6 +158,10 @@ export class DataService {
 
   // ------------------------------------------------------------- 自动保存
 
+  /**
+   * 计划一次防抖落盘：标记 dirty 并重置 400ms 计时器；
+   * 没有当前项目时只置 dirty，等真正有项目（另存为）时再写。
+   */
   private scheduleFlush(): void {
     this.pending = true
     this.patchStatus({ dirty: true })
@@ -191,12 +206,14 @@ export class DataService {
 
   // ------------------------------------------------------------- 项目操作
 
+  /** 新建项目：名字去空格，空则回退为「未命名项目」，然后建库并打开 */
   async createProject(name: string): Promise<void> {
     const project = createProject(name.trim() || '未命名项目')
     await this.insertAndOpen(project)
     this.emit('info', `已创建项目「${project.name}」`)
   }
 
+  /** 打开项目：读库 → 回灌 EditorStore（屏蔽事件）→ 同步状态 */
   async openProject(id: string): Promise<void> {
     try {
       const loaded = await this.client.loadProject(id)
@@ -227,6 +244,7 @@ export class DataService {
     }
   }
 
+  /** 删除项目；若删的是当前项目，则重置编辑器为空项目并清空缓冲 */
   async deleteProject(id: string): Promise<void> {
     try {
       await this.client.deleteProject(id)
@@ -256,6 +274,7 @@ export class DataService {
     }
   }
 
+  /** 重命名当前项目：先改库，再同步内存与状态栏 */
   async renameCurrent(name: string): Promise<void> {
     const id = this.status.currentProjectId
     if (!id) return
@@ -297,6 +316,7 @@ export class DataService {
 
   // ------------------------------------------------------------- 导入导出
 
+  /** 把当前项目导出为 JSON 文件（updatedAt 取当前时刻） */
   exportCurrent(): void {
     const p = this.store.project
     const project: Project = {
@@ -311,6 +331,7 @@ export class DataService {
     exportProjectJson(project)
   }
 
+  /** 解析校验导入文件，并作为新项目打开（导入数据不覆盖当前项目） */
   async importFile(file: File): Promise<void> {
     try {
       const parsed = await parseProjectFile(file)
@@ -325,6 +346,10 @@ export class DataService {
 
   // ------------------------------------------------------------- 内部
 
+  /**
+   * 载入项目到编辑器并持久化：先回灌 store（屏蔽事件），
+   * 再在持久化后端建项目/写全量点位；非持久化模式只载入不落库。
+   */
   private async insertAndOpen(project: Project, history: Operation[] = []): Promise<void> {
     const points = project.points
     this.suppress = true
@@ -355,6 +380,7 @@ export class DataService {
     }
   }
 
+  /** 清理计时器与全局监听，并终止 Worker */
   destroy(): void {
     if (this.flushTimer !== null) window.clearTimeout(this.flushTimer)
     document.removeEventListener('visibilitychange', this.onVisibilityChange)
