@@ -71,8 +71,8 @@ function formatTime(ts: number): string {
           {{ saving ? '保存中…' : '保存到 OPFS' }}
         </button>
         <button @click="exportCurrent">导出 JSON</button>
-        <button @click="pickFile">导入 JSON</button>
-        <input ref="fileInput" type="file" accept="application/json,.json" hidden @change="onFileChange" />
+        <button @click="pickFile">导入 JSON/轨迹</button>
+        <input ref="fileInput" type="file" accept="application/json,.json,.jsdm" hidden @change="onFileChange" />
       </div>
       <p v-if="!opfsSupported" class="warn">当前浏览器不支持 OPFS，存储功能不可用（建议 Chrome/Edge）。</p>
     </div>

@@ -6,12 +6,12 @@
  *
  * 持久化策略：
  * - 点位增删移改、锁定、分组归属 → 按 mutation 增量写；
- * - 分组结构与历史 → 每次整体覆盖（数量小，覆盖更简单且不会不一致）。
+ * - 分组结构 / 过渡 / 帧与轨道 / 历史 → 每次整体覆盖（数量小，覆盖更简单）。
  */
 import type { Database, PreparedStatement } from '@sqlite.org/sqlite-wasm'
 import { HISTORY_LIMIT, type Mutation, type Operation } from '../core/operations'
-import type { Group, Point, ProjectMeta } from '../core/types'
-import type { LoadedProject, ProjectRecord } from './protocol'
+import type { Frame, Group, Point, ProjectMeta, Track, Transition } from '../core/types'
+import type { LoadedProject, ProjectRecord, RenderRecord } from './protocol'
 
 type Row = Array<number | string | null | Uint8Array>
 
@@ -28,20 +28,44 @@ function isTrue(v: unknown): boolean {
 }
 
 // 点位表列名与占位符集中定义，保证写入顺序与 bindPoint 一致
-const POINT_COLUMNS = 'project_id,id,x,y,z,r,g,b,group_id,locked'
-const POINT_PLACEHOLDERS = '?,?,?,?,?,?,?,?,?,?'
+const POINT_COLUMNS = 'project_id,frame_id,id,x,y,z,r,g,b,drone_index,group_id,locked'
+const POINT_PLACEHOLDERS = '?,?,?,?,?,?,?,?,?,?,?,?'
 
 /** 把单个点位绑定到已 prepare 的插入/替换语句并复位，供批量复用 */
 function bindPoint(stmt: PreparedStatement, projectId: string, p: Point): void {
   stmt
-    .bind([projectId, p.id, p.x, p.y, p.z, p.r, p.g, p.b, p.groupId ?? null, p.locked ? 1 : 0])
+    .bind([
+      projectId,
+      p.frameId,
+      p.id,
+      p.x,
+      p.y,
+      p.z,
+      p.r,
+      p.g,
+      p.b,
+      p.droneIndex ?? null,
+      p.groupId ?? null,
+      p.locked ? 1 : 0,
+    ])
     .stepReset()
 }
 
-/** 插入一条项目元信息（点位/历史/分组随后单独写） */
+/** 插入一条项目元信息（轨道/帧/过渡等随后单独写） */
 export function insertProject(db: Database, project: ProjectRecord): void {
-  db.prepare('INSERT INTO projects(id,name,version,created_at,updated_at) VALUES(?,?,?,?,?)')
-    .bind([project.id, project.name, project.version, project.createdAt, project.updatedAt])
+  db.prepare(
+    'INSERT INTO projects(id,name,version,drone_count,drone_max_speed,drone_max_accel,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)',
+  )
+    .bind([
+      project.id,
+      project.name,
+      project.version,
+      project.droneCount,
+      project.maxSpeed ?? 0,
+      project.maxAccel ?? 0,
+      project.createdAt,
+      project.updatedAt,
+    ])
     .stepFinalize()
 }
 
@@ -52,9 +76,8 @@ export function renameProject(db: Database, projectId: string, name: string): vo
     .stepFinalize()
 }
 
-/** 删除项目；points / history / groups 依靠外键级联一并清除 */
+/** 删除项目；子表依靠外键级联一并清除 */
 export function deleteProject(db: Database, projectId: string): void {
-  // points / history / groups 通过外键 ON DELETE CASCADE 一起清除
   db.prepare('DELETE FROM projects WHERE id = ?').bind([projectId]).stepFinalize()
 }
 
@@ -77,29 +100,31 @@ export function listProjects(db: Database): ProjectMeta[] {
   }))
 }
 
-/** 读取点位，按插入顺序（rowid）返回；group_id/locked 为空时不写该字段 */
+/** 读取点位，按插入顺序（rowid）返回 */
 function readPoints(db: Database, projectId: string): Point[] {
   const rows = db.selectArrays(
-    'SELECT id,x,y,z,r,g,b,group_id,locked FROM points WHERE project_id = ? ORDER BY rowid ASC',
+    'SELECT frame_id,id,x,y,z,r,g,b,drone_index,group_id,locked FROM points WHERE project_id = ? ORDER BY rowid ASC',
     [projectId],
   ) as Row[]
   return rows.map((r) => {
     const point: Point = {
-      id: str(r[0]),
-      x: num(r[1]),
-      y: num(r[2]),
-      z: num(r[3]),
-      r: num(r[4]),
-      g: num(r[5]),
-      b: num(r[6]),
+      id: str(r[1]),
+      frameId: str(r[0]),
+      x: num(r[2]),
+      y: num(r[3]),
+      z: num(r[4]),
+      r: num(r[5]),
+      g: num(r[6]),
+      b: num(r[7]),
     }
-    if (r[7] != null) point.groupId = str(r[7])
-    if (isTrue(r[8])) point.locked = true
+    if (r[8] != null) point.droneIndex = num(r[8])
+    if (r[9] != null) point.groupId = str(r[9])
+    if (isTrue(r[10])) point.locked = true
     return point
   })
 }
 
-/** 读取分组，颜色由三列整数重新组装成 RGB 对象 */
+/** 读取分组 */
 function readGroups(db: Database, projectId: string): Group[] {
   const rows = db.selectArrays(
     'SELECT id,name,color_r,color_g,color_b FROM groups WHERE project_id = ? ORDER BY rowid ASC',
@@ -109,6 +134,76 @@ function readGroups(db: Database, projectId: string): Group[] {
     id: str(r[0]),
     name: str(r[1]),
     color: { r: num(r[2]), g: num(r[3]), b: num(r[4]) },
+  }))
+}
+
+/** 读取所有轨道，并装配其帧与过渡 */
+function readTracks(db: Database, projectId: string): Track[] {
+  const trackRows = db.selectArrays(
+    'SELECT id,name FROM tracks WHERE project_id = ? ORDER BY order_index ASC',
+    [projectId],
+  ) as Row[]
+  const frameRows = db.selectArrays(
+    'SELECT id,track_id,name,thumbnail,width,height,duration,source,params FROM frames WHERE project_id = ? ORDER BY order_index ASC',
+    [projectId],
+  ) as Row[]
+  const transRows = db.selectArrays(
+    'SELECT id,track_id,from_frame_id,to_frame_id,duration,algorithm,path,easing,velocity_profile,stagger,params FROM transitions WHERE project_id = ? ORDER BY order_index ASC',
+    [projectId],
+  ) as Row[]
+
+  const framesByTrack = new Map<string, Frame[]>()
+  for (const r of frameRows) {
+    const frame: Frame = {
+      id: str(r[0]),
+      name: str(r[2]),
+      thumbnail: str(r[3]),
+      width: num(r[4]),
+      height: num(r[5]),
+      duration: num(r[6]),
+    }
+    if (r[7] != null && str(r[7]) !== '') frame.source = str(r[7])
+    if (r[8] != null && str(r[8]) !== '') {
+      try {
+        frame.params = JSON.parse(str(r[8])) as Frame['params']
+      } catch {
+        // 参数损坏则忽略，回落到默认
+      }
+    }
+    const list = framesByTrack.get(str(r[1]))
+    if (list) list.push(frame)
+    else framesByTrack.set(str(r[1]), [frame])
+  }
+  const transByTrack = new Map<string, Transition[]>()
+  for (const r of transRows) {
+    let params: Record<string, number> = {}
+    try {
+      params = JSON.parse(str(r[10])) as Record<string, number>
+    } catch {
+      params = {}
+    }
+    const tr: Transition = {
+      id: str(r[0]),
+      fromFrameId: str(r[2]),
+      toFrameId: str(r[3]),
+      duration: num(r[4]),
+      algorithm: str(r[5]) as Transition['algorithm'],
+      path: str(r[6]) as Transition['path'],
+      easing: str(r[7]) as Transition['easing'],
+      velocityProfile: (str(r[8]) || 'ease') as Transition['velocityProfile'],
+      stagger: num(r[9]) || 0,
+      params,
+    }
+    const list = transByTrack.get(str(r[1]))
+    if (list) list.push(tr)
+    else transByTrack.set(str(r[1]), [tr])
+  }
+
+  return trackRows.map((r) => ({
+    id: str(r[0]),
+    name: str(r[1]),
+    clips: framesByTrack.get(str(r[0])) ?? [],
+    transitions: transByTrack.get(str(r[0])) ?? [],
   }))
 }
 
@@ -132,7 +227,7 @@ function readHistory(db: Database, projectId: string): Operation[] {
 /** 加载完整项目；项目不存在返回 null */
 export function loadProject(db: Database, projectId: string): LoadedProject | null {
   const rows = db.selectArrays(
-    'SELECT id,name,version,created_at,updated_at FROM projects WHERE id = ?',
+    'SELECT id,name,version,drone_count,drone_max_speed,drone_max_accel,created_at,updated_at FROM projects WHERE id = ?',
     [projectId],
   ) as Row[]
   const meta = rows[0]
@@ -142,18 +237,20 @@ export function loadProject(db: Database, projectId: string): LoadedProject | nu
       id: str(meta[0]),
       name: str(meta[1]),
       version: num(meta[2]),
-      createdAt: num(meta[3]),
-      updatedAt: num(meta[4]),
+      droneCount: num(meta[3]),
+      droneLimits: { maxSpeed: num(meta[4]) || 0, maxAccel: num(meta[5]) || 0 },
+      createdAt: num(meta[6]),
+      updatedAt: num(meta[7]),
       points: readPoints(db, projectId),
       groups: readGroups(db, projectId),
+      tracks: readTracks(db, projectId),
     },
     history: readHistory(db, projectId),
   }
 }
 
 /**
- * 覆盖保存历史：先清空再整体重写，只保留最近 HISTORY_LIMIT(=100) 条，
- * 与内存历史栈的深度上限保持一致。
+ * 覆盖保存历史：先清空再整体重写，只保留最近 HISTORY_LIMIT(=100) 条。
  */
 export function saveHistory(db: Database, projectId: string, ops: Operation[]): void {
   db.prepare('DELETE FROM history WHERE project_id = ?').bind([projectId]).stepFinalize()
@@ -182,11 +279,70 @@ export function saveGroups(db: Database, projectId: string, groups: Group[]): vo
   stmt.finalize()
 }
 
+/** 轨道 / 帧 / 过渡整体覆盖保存 */
+export function saveTracks(db: Database, projectId: string, tracks: Track[]): void {
+  db.prepare('DELETE FROM transitions WHERE project_id = ?').bind([projectId]).stepFinalize()
+  db.prepare('DELETE FROM frames WHERE project_id = ?').bind([projectId]).stepFinalize()
+  db.prepare('DELETE FROM tracks WHERE project_id = ?').bind([projectId]).stepFinalize()
+  if (tracks.length === 0) return
+
+  const trackStmt = db.prepare(
+    'INSERT INTO tracks(project_id,id,name,order_index) VALUES(?,?,?,?)',
+  )
+  const frameStmt = db.prepare(
+    'INSERT INTO frames(project_id,id,track_id,name,thumbnail,width,height,duration,source,params,order_index) VALUES(?,?,?,?,?,?,?,?,?,?,?)',
+  )
+  const transStmt = db.prepare(
+    'INSERT INTO transitions(project_id,id,track_id,from_frame_id,to_frame_id,duration,algorithm,path,easing,velocity_profile,stagger,params,order_index) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',
+  )
+  tracks.forEach((track, ti) => {
+    trackStmt.bind([projectId, track.id, track.name, ti]).stepReset()
+    track.clips.forEach((f, fi) => {
+      frameStmt
+        .bind([
+          projectId,
+          f.id,
+          track.id,
+          f.name,
+          f.thumbnail,
+          f.width,
+          f.height,
+          f.duration,
+          f.source ?? null,
+          f.params ? JSON.stringify(f.params) : null,
+          fi,
+        ])
+        .stepReset()
+    })
+    track.transitions.forEach((tr, ri) => {
+      transStmt
+        .bind([
+          projectId,
+          tr.id,
+          track.id,
+          tr.fromFrameId,
+          tr.toFrameId,
+          tr.duration,
+          tr.algorithm,
+          tr.path,
+          tr.easing,
+          tr.velocityProfile ?? 'ease',
+          tr.stagger ?? 0,
+          JSON.stringify(tr.params),
+          ri,
+        ])
+        .stepReset()
+    })
+  })
+  trackStmt.finalize()
+  frameStmt.finalize()
+  transStmt.finalize()
+}
+
 /** 应用单条 mutation：点级增删移改/改色/分组/锁定，均为增量 SQL */
 function applyMutation(db: Database, projectId: string, mutation: Mutation): void {
   switch (mutation.type) {
     case 'add': {
-      // 用 INSERT OR REPLACE：导入/重做时同 id 点位可安全覆盖
       const stmt = db.prepare(
         `INSERT OR REPLACE INTO points(${POINT_COLUMNS}) VALUES(${POINT_PLACEHOLDERS})`,
       )
@@ -201,14 +357,12 @@ function applyMutation(db: Database, projectId: string, mutation: Mutation): voi
       break
     }
     case 'move': {
-      // 只更新平面坐标 x/y，z 与颜色不变
       const stmt = db.prepare('UPDATE points SET x = ?, y = ? WHERE project_id = ? AND id = ?')
       for (const u of mutation.updates) stmt.bind([u.x, u.y, projectId, u.id]).stepReset()
       stmt.finalize()
       break
     }
     case 'color': {
-      // 同一条语句批量改色，颜色对所有 id 相同
       const stmt = db.prepare(
         'UPDATE points SET r = ?, g = ?, b = ? WHERE project_id = ? AND id = ?',
       )
@@ -219,7 +373,6 @@ function applyMutation(db: Database, projectId: string, mutation: Mutation): voi
       break
     }
     case 'setGroup': {
-      // group_id 允许为 null，表示移出分组
       const stmt = db.prepare('UPDATE points SET group_id = ? WHERE project_id = ? AND id = ?')
       for (const [id, groupId] of mutation.entries) {
         stmt.bind([groupId, projectId, id]).stepReset()
@@ -246,7 +399,8 @@ function touchProject(db: Database, projectId: string): void {
 }
 
 /**
- * 增量写入：应用一批已提交的 mutation，并覆盖保存历史与分组结构，全在同一个事务里。
+ * 增量写入：应用一批已提交的 mutation，并覆盖保存历史 / 分组 / 轨道结构，
+ * 全在同一个事务里。
  */
 export function applyChanges(
   db: Database,
@@ -254,22 +408,24 @@ export function applyChanges(
   mutations: Mutation[],
   history: Operation[],
   groups: Group[],
+  tracks: Track[],
 ): void {
   db.transaction(() => {
     for (const mutation of mutations) applyMutation(db, projectId, mutation)
     saveHistory(db, projectId, history)
     saveGroups(db, projectId, groups)
+    saveTracks(db, projectId, tracks)
     touchProject(db, projectId)
   })
 }
 
-/** 全量替换点位（用于导入 / 加载测试数据） */
-export function replacePoints(
+/** 全量替换项目数据（用于导入 / 打开 / 载入） */export function replaceData(
   db: Database,
   projectId: string,
   points: Point[],
   history: Operation[],
   groups: Group[],
+  tracks: Track[],
 ): void {
   db.transaction(() => {
     db.prepare('DELETE FROM points WHERE project_id = ?').bind([projectId]).stepFinalize()
@@ -280,6 +436,49 @@ export function replacePoints(
     stmt.finalize()
     saveHistory(db, projectId, history)
     saveGroups(db, projectId, groups)
+    saveTracks(db, projectId, tracks)
     touchProject(db, projectId)
   })
+}
+
+// ------------------------------------------------------------ 过渡产物
+
+/** 保存 / 覆盖一条过渡产物 */
+export function saveRender(db: Database, projectId: string, render: RenderRecord): void {
+  db.prepare(
+    'INSERT OR REPLACE INTO transition_renders(project_id,transition_id,signature,algorithm,payload,elapsed_ms,created_at) VALUES(?,?,?,?,?,?,?)',
+  )
+    .bind([
+      projectId,
+      render.transitionId,
+      render.signature,
+      render.algorithm,
+      render.payload,
+      render.elapsedMs,
+      render.createdAt,
+    ])
+    .stepFinalize()
+}
+
+/** 读取项目下全部过渡产物 */
+export function listRenders(db: Database, projectId: string): RenderRecord[] {
+  const rows = db.selectArrays(
+    'SELECT transition_id,signature,algorithm,payload,elapsed_ms,created_at FROM transition_renders WHERE project_id = ?',
+    [projectId],
+  ) as Row[]
+  return rows.map((r) => ({
+    transitionId: str(r[0]),
+    signature: str(r[1]),
+    algorithm: str(r[2]),
+    payload: str(r[3]),
+    elapsedMs: num(r[4]),
+    createdAt: num(r[5]),
+  }))
+}
+
+/** 删除单条过渡产物 */
+export function deleteRender(db: Database, projectId: string, transitionId: string): void {
+  db.prepare('DELETE FROM transition_renders WHERE project_id = ? AND transition_id = ?')
+    .bind([projectId, transitionId])
+    .stepFinalize()
 }

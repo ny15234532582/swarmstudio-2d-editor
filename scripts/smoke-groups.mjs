@@ -19,6 +19,7 @@
  * 关键步骤见文件内注释；脚本以 JSON 打印结果，不抛非零退出码。
  */
 import puppeteer from 'puppeteer-core'
+import { injectTestPoints } from './smoke-utils.mjs'
 
 // 被测地址、Chrome 路径及通用工具
 const url = process.argv[2] || 'http://localhost:4173/'
@@ -66,8 +67,8 @@ try {
   await page.goto(url, { waitUntil: 'domcontentloaded' })
   await sleep(2200)
 
-  // 生成测试点位，作为套索选中的对象
-  await clickByText('生成')
+  // 注入测试点位，作为套索选中的对象（旧的「生成测试数据」按钮已移除）
+  await injectTestPoints(page, 20000)
   await sleep(3500)
 
   // 获取画布矩形并计算中心点与套索半径，便于将交互换算到屏幕坐标

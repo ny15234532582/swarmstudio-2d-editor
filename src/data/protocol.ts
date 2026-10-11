@@ -2,30 +2,36 @@
  * 主线程 ↔ Worker 的消息协议。
  *
  * 所有请求都带自增 id，Worker 按 id 回包；result 类型由 client 侧做断言。
- * 请求体里的数据都是可结构化克隆的纯对象（Point / Operation / Mutation）。
+ * 请求体里的数据都是可结构化克隆的纯对象（Point / Operation / Mutation / Track）。
  */
 import type { Mutation, Operation } from '../core/operations'
-import type { Group, Point, ProjectMeta } from '../core/types'
+import type { Group, Point, ProjectMeta, Track } from '../core/types'
 
-/** 项目元信息（写库用，不含 points） */
+/** 项目元信息（写库用，不含点位/轨道） */
 export interface ProjectRecord {
   id: string
   name: string
   version: number
+  droneCount: number
+  maxSpeed: number
+  maxAccel: number
   createdAt: number
   updatedAt: number
 }
 
-/** 从库中取出的完整项目：元信息 + 点位/分组 + 可复用的历史栈 */
+/** 从库中取出的完整项目：元信息 + 点位/分组/轨道 + 可复用的历史栈 */
 export interface LoadedProject {
   project: {
     id: string
     name: string
     version: number
+    droneCount: number
+    droneLimits: { maxSpeed: number; maxAccel: number }
     createdAt: number
     updatedAt: number
     points: Point[]
     groups: Group[]
+    tracks: Track[]
   }
   history: Operation[]
 }
@@ -41,21 +47,31 @@ export interface WorkerInitInfo {
   message?: string
 }
 
+/** 过渡产物记录（存 transition_renders 表） */
+export interface RenderRecord {
+  transitionId: string
+  signature: string
+  algorithm: string
+  payload: string
+  elapsedMs: number
+  createdAt: number
+}
+
 /**
  * 主线程 → Worker 的请求联合类型。
- *
- * id 为自增序号，Worker 原样带回，主线程据此把响应配对到对应的 Promise。
- * 除 init / listProjects 外都以 projectId 定位目标项目。
  */
 export type Request =
-  | { id: number; type: 'init' } // 初始化数据库，返回存储后端信息
-  | { id: number; type: 'listProjects' } // 项目摘要列表（含点位数）
-  | { id: number; type: 'loadProject'; projectId: string } // 打开项目：读元信息 + 点位 + 分组 + 历史
-  | { id: number; type: 'getProject'; projectId: string } // 只读取项目，语义同 loadProject
-  | { id: number; type: 'createProject'; project: ProjectRecord } // 插入项目元信息
-  | { id: number; type: 'renameProject'; projectId: string; name: string } // 重命名并刷新 updated_at
-  | { id: number; type: 'deleteProject'; projectId: string } // 删除项目（子表级联清除）
-  // 增量落盘：应用一批 mutation，并整体覆盖历史与分组（同一事务）
+  | { id: number; type: 'init' }
+  | { id: number; type: 'listProjects' }
+  | { id: number; type: 'loadProject'; projectId: string }
+  | { id: number; type: 'getProject'; projectId: string }
+  | { id: number; type: 'createProject'; project: ProjectRecord }
+  | { id: number; type: 'renameProject'; projectId: string; name: string }
+  | { id: number; type: 'deleteProject'; projectId: string }
+  | { id: number; type: 'listRenders'; projectId: string }
+  | { id: number; type: 'saveRender'; projectId: string; render: RenderRecord }
+  | { id: number; type: 'deleteRender'; projectId: string; transitionId: string }
+  // 增量落盘：应用一批 mutation，并整体覆盖历史 / 分组 / 轨道结构（同一事务）
   | {
       id: number
       type: 'applyChanges'
@@ -63,15 +79,17 @@ export type Request =
       mutations: Mutation[]
       history: Operation[]
       groups: Group[]
+      tracks: Track[]
     }
-  // 全量替换点位（导入 / 载入测试数据），同时重置历史与分组
+  // 全量替换项目数据（导入 / 打开），同时重置历史 / 分组 / 轨道
   | {
       id: number
-      type: 'replacePoints'
+      type: 'replaceData'
       projectId: string
       points: Point[]
       history: Operation[]
       groups: Group[]
+      tracks: Track[]
     }
 
 /** 请求类型 → 返回结果类型的映射（client 侧据此推断类型） */
@@ -83,14 +101,15 @@ export interface RequestResultMap {
   createProject: void
   renameProject: void
   deleteProject: void
+  listRenders: RenderRecord[]
+  saveRender: void
+  deleteRender: void
   applyChanges: void
-  replacePoints: void
+  replaceData: void
 }
 
 /**
  * Worker → 主线程的响应联合类型。
- * ok 为 true 时携带 result（具体类型由发起方按 Request 断言），
- * 否则携带 error 文本；两种情况都带同一个 id 供配对。
  */
 export type Response =
   | { id: number; ok: true; result: unknown }

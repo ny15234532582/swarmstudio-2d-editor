@@ -9,7 +9,9 @@ import type { BinarizeParams } from './imageProcessor'
 /** render 的返回：只回传小预览与统计，不回传完整点位 */
 export interface PreviewResult {
   selectedCount: number
+  /** 按最小间距采样后预计生成的点数（= 预计无人机数） */
   pointCount: number
+  /** 采样步长（像素） */
   step: number
   previewWidth: number
   previewHeight: number

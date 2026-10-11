@@ -203,11 +203,12 @@ PixiJS v8 支持 Worker 渲染（`WebWorkerAdapter` + `OffscreenCanvas`），但
 
 1. 主线程 `createImageBitmap` 解码，缩到最长边 ≤1600（控内存 + 超采样），`getImageData` 取像素；
 2. 像素**一次性 transfer** 给 compute worker；
-3. Worker：灰度化 → 阈值二值化（可反相、丢弃透明像素）→ 按目标点数算网格步长抽稀
+3. Worker：灰度化 → 阈值二值化（可反相、丢弃透明像素）→ 按最小间距算网格步长抽稀
    → 以图片中心为原点、按目标世界宽度等比缩放为 `Point[]`（`z = 0`）；
 4. 主线程实时预览；确认后走既有 `loadPointsAsProject` 落库。
 
-- 抽稀：`step = round(sqrt(保留像素数 / 目标点数))`，生成点数可控。
+- 抽稀：`step = ceil(最小间距 × 图宽 / worldWidth)`，由「最小间距（米）」驱动，
+  向上取整保证实际相邻间距 ≥ 最小间距；**采样点数即预计所需无人机数量**。
 - 纯函数核心 `compute/imageProcessor.ts` 不依赖 DOM/Worker，可在 Node 单测。
 - 坑：Vue 的 `reactive` 代理无法 `postMessage` 结构化克隆（`DataCloneError`），
   发送前必须拍成纯对象。

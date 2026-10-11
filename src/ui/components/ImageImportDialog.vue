@@ -1,44 +1,49 @@
 <script setup lang="ts">
 /**
- * 图片导入弹窗：把一张图片按二值化规则采样成点集并载入为新项目。
+ * 图片导入 / 帧编辑弹窗。
  *
- * 关键设计：
- * - v-model:open 契约：对外只暴露 open 布尔值，内部通过 emit('update:open')
- *   请求父组件关闭，弹窗自身不持有显隐状态，符合 Vue 受控组件约定。
- * - 解码与计算在 Web Worker（client）中完成，避免大图阻塞主线程；参数每次
- *   变更做防抖后重算预览，并用递增序号丢弃过期结果，保证预览与最新参数一致。
+ * - 新增模式（frameId 为空）：导入一张图片，按二值化规则采样成点集，作为新帧追加到时间线。
+ * - 编辑模式（传入 frameId）：用帧里保存的源图回填参数与预览，可改名称/时长/采样参数，
+ *   点「应用」重新生成该帧点位（帧 id 不变，过渡引用不失效）。
+ *
+ * 解码与计算在 compute worker 完成；参数变更做防抖后重算预览，并用递增序号丢弃过期结果。
  */
 import { computed, reactive, ref, watch } from 'vue'
+import { DEFAULT_BINARIZE_PARAMS, type BinarizeParams } from '../../compute/imageProcessor'
 import {
-  DEFAULT_BINARIZE_PARAMS,
-  type BinarizeParams,
-} from '../../compute/imageProcessor'
-import { getImageComputeClient, type LoadedImageInfo } from '../../compute/client'
-import { loadPointsAsProject } from '../projects'
+  createSourceImage,
+  createThumbnail,
+  getImageComputeClient,
+  type LoadedImageInfo,
+} from '../../compute/client'
+import { createFrame } from '../../core/factory'
+import type { FrameParams } from '../../core/types'
+import { droneCount, editor } from '../editor'
+import { appendImage } from '../projects'
 import { toast } from '../toast'
+import Modal from './Modal.vue'
 
-const props = defineProps<{ open: boolean }>()
+const props = defineProps<{ open: boolean; frameId?: string | null }>()
 const emit = defineEmits<{ (e: 'update:open', value: boolean): void }>()
 
-// Worker 计算客户端（模块级单例，复用同一 Worker）
 const client = getImageComputeClient()
+const isEdit = computed(() => !!props.frameId)
 
 const fileInput = ref<HTMLInputElement>()
-// 预览用的 2D canvas：直接 putImageData 显示 worker 回传的像素
 const previewCanvas = ref<HTMLCanvasElement>()
-// 已解码图片的信息（尺寸/名称）；null 表示尚未选择图片
 const imageInfo = ref<LoadedImageInfo | null>(null)
-// 预览统计：命中像素数、采样步长、预计生成点数
+const selectedFile = ref<File | null>(null)
 const selectedCount = ref(0)
 const pointCount = ref(0)
 const step = ref(1)
 const rendering = ref(false)
 const generating = ref(false)
+const name = ref('')
+const duration = ref(3)
 
-// 二值化参数（响应式）；展开默认值避免与常量共享引用
 const params = reactive<BinarizeParams>({ ...DEFAULT_BINARIZE_PARAMS })
 
-// 取色器的 #RRGGBB <-> RGB 双向绑定：把 params.fixedColor 适配到 input[type=color]
+/** 取色器的 #RRGGBB <-> RGB 双向绑定 */
 const colorHex = computed({
   get: () =>
     '#' +
@@ -54,43 +59,59 @@ const colorHex = computed({
   },
 })
 
-// 请求序号：仅采纳最新一次请求的结果，防止慢请求覆盖快请求
 let renderSeq = 0
-// 参数变更防抖计时器（150ms），避免拖动滑杆时频繁重算
 let debounceTimer: number | null = null
 
-/**
- * 传给 Worker 前必须转成纯对象：Vue 的 reactive 代理（包括嵌套的 fixedColor）
- * 无法被 postMessage 结构化克隆，直接传会抛 DataCloneError。
- */
+/** 传给 Worker 前必须转成纯对象（Vue reactive 代理无法结构化克隆） */
 function snapshotParams(): BinarizeParams {
   return {
     threshold: params.threshold,
     invert: params.invert,
-    targetPoints: params.targetPoints,
+    minSpacing: params.minSpacing,
+    maxPoints: params.maxPoints,
     colorMode: params.colorMode,
     fixedColor: { ...params.fixedColor },
     worldWidth: params.worldWidth,
   }
 }
 
-/** 触发隐藏的文件选择框 */
-async function pickFile(): Promise<void> {
+function applyFrameParams(fp: FrameParams): void {
+  params.threshold = fp.threshold
+  params.invert = fp.invert
+  params.minSpacing = fp.minSpacing
+  params.colorMode = fp.colorMode
+  params.fixedColor = { ...fp.fixedColor }
+  params.worldWidth = fp.worldWidth
+}
+
+function pickFile(): void {
   fileInput.value?.click()
 }
 
-/** 图片选择回调：解码 → 首次预览；失败时提示并清空状态 */
+/** 把 data URL 源图重新装进 worker（编辑模式回填） */
+async function loadSource(source: string, baseName: string): Promise<void> {
+  const res = await fetch(source)
+  const blob = await res.blob()
+  const file = new File([blob], baseName || 'frame.jpg', { type: blob.type || 'image/jpeg' })
+  selectedFile.value = file
+  imageInfo.value = await client.load(file)
+}
+
 async function onFileChange(event: Event): Promise<void> {
   const input = event.target as HTMLInputElement
   const file = input.files?.[0]
   input.value = ''
   if (!file) return
   try {
+    selectedFile.value = file
     imageInfo.value = await client.load(file)
+    if (!isEdit.value) name.value = file.name
+    params.maxPoints = droneCount.value
     await render()
   } catch (err) {
     toast(`图片载入失败：${(err as Error).message}`, 'error', 5000)
     imageInfo.value = null
+    selectedFile.value = null
   }
 }
 
@@ -101,7 +122,7 @@ async function render(): Promise<void> {
   rendering.value = true
   try {
     const { info, image } = await client.render(snapshotParams())
-    if (seq !== renderSeq) return // 丢弃过期的预览结果
+    if (seq !== renderSeq) return
     selectedCount.value = info.selectedCount
     pointCount.value = info.pointCount
     step.value = info.step
@@ -118,7 +139,6 @@ async function render(): Promise<void> {
   }
 }
 
-/** 防抖地安排一次预览重算（拖动滑杆时的入口） */
 function scheduleRender(): void {
   if (debounceTimer !== null) window.clearTimeout(debounceTimer)
   debounceTimer = window.setTimeout(() => {
@@ -127,29 +147,80 @@ function scheduleRender(): void {
   }, 150)
 }
 
-// 参数变化 → 防抖重算预览（colorHex 用 value 读取，确保依赖被追踪）
+// 参数变化 → 防抖重算预览
 watch(
-  () => [params.threshold, params.invert, params.targetPoints, params.colorMode, colorHex.value],
+  () => [params.threshold, params.invert, params.minSpacing, params.colorMode, colorHex.value],
   () => scheduleRender(),
 )
 
-// 弹窗重新打开且已有图片时，立即刷新一次预览
+/** 打开时：编辑模式回填帧（含源图与参数），新增模式跟随当前无人机上限 */
 watch(
   () => props.open,
-  (open) => {
-    if (open && imageInfo.value) void render()
+  async (open) => {
+    if (!open) return
+    params.maxPoints = droneCount.value
+    if (props.frameId) {
+      const frame = editor.getFrame(props.frameId)
+      if (!frame) return
+      name.value = frame.name
+      duration.value = frame.duration
+      if (frame.params) applyFrameParams(frame.params)
+      if (frame.source) {
+        try {
+          await loadSource(frame.source, frame.name)
+          await render()
+        } catch (err) {
+          toast(`源图载入失败：${(err as Error).message}`, 'error', 5000)
+        }
+      } else if (imageInfo.value) {
+        await render()
+      }
+      return
+    }
+    if (imageInfo.value) await render()
   },
 )
 
-/** 确认生成：请求 worker 生成点集并作为新项目载入；仅在成功载入后关闭弹窗 */
+/** 确认：生成点位；编辑模式替换该帧，新增模式追加新帧 */
 async function confirm(): Promise<void> {
-  if (!imageInfo.value || pointCount.value === 0) return
+  if (!imageInfo.value || !selectedFile.value || pointCount.value === 0) return
   generating.value = true
   try {
     const points = await client.generate(snapshotParams())
-    const name = `图片点位 · ${imageInfo.value.name}`.slice(0, 60)
-    // 若用户在有未保存修改时放弃，则不关闭弹窗
-    if (await loadPointsAsProject(points, name)) close()
+    const thumb = await createThumbnail(selectedFile.value)
+    const source = await createSourceImage(selectedFile.value)
+    const paramsSnapshot: FrameParams = {
+      threshold: params.threshold,
+      invert: params.invert,
+      minSpacing: params.minSpacing,
+      colorMode: params.colorMode,
+      fixedColor: { ...params.fixedColor },
+      worldWidth: params.worldWidth,
+    }
+    const frameName = (name.value.trim() || imageInfo.value.name).slice(0, 60)
+    const frameDuration = Math.max(0.1, Number(duration.value) || 3)
+    if (props.frameId) {
+      editor.updateFrameContent(props.frameId, {
+        name: frameName,
+        duration: frameDuration,
+        thumbnail: thumb,
+        source,
+        params: paramsSnapshot,
+        points,
+      })
+      close()
+    } else {
+      const frame = createFrame(
+        frameName,
+        thumb,
+        imageInfo.value.width,
+        imageInfo.value.height,
+        frameDuration,
+        source,
+        paramsSnapshot,
+      )
+      if (await appendImage(frame, points)) close()
+    }
   } catch (err) {
     toast((err as Error).message, 'error', 5000)
   } finally {
@@ -157,126 +228,96 @@ async function confirm(): Promise<void> {
   }
 }
 
-/** 请求父组件关闭弹窗（受控：自身不直接改 open） */
 function close(): void {
   emit('update:open', false)
 }
 </script>
 
 <template>
-  <div v-if="props.open" class="overlay" @click.self="close">
-    <div class="dialog">
-      <!-- 区域：标题栏 -->
-      <header class="head">
-        <h3>导入图片生成点位</h3>
-        <button class="ghost" @click="close">✕</button>
-      </header>
-
-      <div class="body">
-        <!-- 区域：左侧预览画布（未选图时显示占位提示） -->
-        <div class="preview">
-          <canvas v-show="imageInfo" ref="previewCanvas" class="canvas" />
-          <div v-if="!imageInfo" class="placeholder">选择一张图片开始</div>
-        </div>
-
-        <!-- 区域：右侧参数控件 -->
-        <div class="controls">
-          <button class="primary" @click="pickFile">选择图片…</button>
-          <input ref="fileInput" type="file" accept="image/*" hidden @change="onFileChange" />
-          <p v-if="imageInfo" class="meta">
-            {{ imageInfo.name }}<br />
-            解码尺寸：{{ imageInfo.width }}×{{ imageInfo.height }}
-          </p>
-
-          <!-- 二值化阈值 -->
-          <label class="field">
-            <span>阈值 {{ params.threshold }}</span>
-            <input v-model.number="params.threshold" type="range" min="0" max="255" step="1" />
-          </label>
-
-          <!-- 反相：改取深色图案 -->
-          <label class="field row">
-            <input v-model="params.invert" type="checkbox" />
-            <span>反相（深色图案取点）</span>
-          </label>
-
-          <!-- 目标点数：控制采样密度 -->
-          <label class="field">
-            <span>目标点数 {{ params.targetPoints }}</span>
-            <input v-model.number="params.targetPoints" type="range" min="500" max="50000" step="500" />
-          </label>
-
-          <!-- 取色模式：原图颜色或统一颜色 -->
-          <label class="field row">
-            <span>取色</span>
-            <select v-model="params.colorMode">
-              <option value="source">使用原图颜色</option>
-              <option value="fixed">统一颜色</option>
-            </select>
-            <input v-if="params.colorMode === 'fixed'" v-model="colorHex" type="color" />
-          </label>
-
-          <!-- 实时统计 -->
-          <div class="stat">
-            <div>识别像素：<b>{{ selectedCount }}</b></div>
-            <div>采样步长：<b>{{ step }}</b></div>
-            <div>将生成：<b>{{ pointCount }}</b> 个点</div>
-          </div>
-        </div>
+  <Modal
+    :open="props.open"
+    :title="isEdit ? '编辑帧' : '导入图片生成点位'"
+    width="760px"
+    @close="close"
+  >
+    <div class="body">
+      <!-- 左侧预览 -->
+      <div class="preview">
+        <canvas v-show="imageInfo" ref="previewCanvas" class="canvas" />
+        <div v-if="!imageInfo" class="placeholder">选择一张图片开始</div>
       </div>
 
-      <!-- 区域：底部操作栏 -->
-      <footer class="foot">
-        <span class="hint">{{ rendering ? '计算中…' : '调整参数实时预览' }}</span>
-        <button @click="close">取消</button>
-        <button class="primary" :disabled="!imageInfo || pointCount === 0 || generating" @click="confirm">
-          {{ generating ? '生成中…' : '生成并载入' }}
+      <!-- 右侧参数 -->
+      <div class="controls">
+        <button class="primary" @click="pickFile">
+          {{ isEdit ? '重新选择图片…' : '选择图片…' }}
         </button>
-      </footer>
+        <input ref="fileInput" type="file" accept="image/*" hidden @change="onFileChange" />
+        <p v-if="imageInfo" class="meta">
+          {{ imageInfo.name }}<br />
+          解码尺寸：{{ imageInfo.width }}×{{ imageInfo.height }}
+        </p>
+
+        <label class="field">
+          <span>帧名称</span>
+          <input v-model="name" type="text" placeholder="帧名称" />
+        </label>
+
+        <label class="field">
+          <span>停留时长（秒）</span>
+          <input v-model.number="duration" type="number" min="0.1" step="0.5" />
+        </label>
+
+        <label class="field">
+          <span>阈值 {{ params.threshold }}</span>
+          <input v-model.number="params.threshold" type="range" min="0" max="255" step="1" />
+        </label>
+
+        <label class="field row">
+          <input v-model="params.invert" type="checkbox" />
+          <span>反相（深色图案取点）</span>
+        </label>
+
+        <label class="field">
+          <span>最小间距 {{ params.minSpacing }} 米</span>
+          <input v-model.number="params.minSpacing" type="range" min="1" max="50" step="0.5" />
+        </label>
+
+        <label class="field row">
+          <span>取色</span>
+          <select v-model="params.colorMode">
+            <option value="source">使用原图颜色</option>
+            <option value="fixed">统一颜色</option>
+          </select>
+          <input v-if="params.colorMode === 'fixed'" v-model="colorHex" type="color" />
+        </label>
+
+        <div class="stat">
+          <div>识别像素：<b>{{ selectedCount }}</b></div>
+          <div>采样步长：<b>{{ step }}</b> 像素</div>
+          <div>预计无人机数：<b>{{ pointCount }}</b> 架 / 上限 {{ params.maxPoints }}</div>
+        </div>
+      </div>
     </div>
-  </div>
+
+    <template #footer>
+      <span class="hint">{{ rendering ? '计算中…' : '' }}</span>
+      <button @click="close">取消</button>
+      <button
+        class="primary"
+        :disabled="!imageInfo || pointCount === 0 || generating"
+        @click="confirm"
+      >
+        {{ generating ? '生成中…' : isEdit ? '应用' : '生成并添加帧' }}
+      </button>
+    </template>
+  </Modal>
 </template>
 
 <style scoped>
-.overlay {
-  position: fixed;
-  inset: 0;
-  background: rgba(0, 0, 0, 0.55);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  z-index: 200;
-}
-.dialog {
-  width: 760px;
-  max-width: 92vw;
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
-  display: flex;
-  flex-direction: column;
-}
-.head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 12px 16px;
-  border-bottom: 1px solid var(--border);
-}
-.head h3 {
-  margin: 0;
-  font-size: 15px;
-}
-.ghost {
-  background: transparent;
-  border: none;
-  font-size: 15px;
-}
 .body {
   display: flex;
   gap: 16px;
-  padding: 16px;
 }
 .preview {
   flex: 1;
@@ -299,7 +340,7 @@ function close(): void {
   font-size: 13px;
 }
 .controls {
-  width: 260px;
+  width: 280px;
   flex-shrink: 0;
   display: flex;
   flex-direction: column;
@@ -324,9 +365,6 @@ function close(): void {
   align-items: center;
   gap: 8px;
 }
-.field input[type='range'] {
-  padding: 0;
-}
 .stat {
   font-size: 13px;
   line-height: 1.7;
@@ -334,13 +372,6 @@ function close(): void {
 }
 .stat b {
   color: var(--accent);
-}
-.foot {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 12px 16px;
-  border-top: 1px solid var(--border);
 }
 .hint {
   flex: 1;

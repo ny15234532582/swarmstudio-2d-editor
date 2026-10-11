@@ -127,3 +127,35 @@ export function getImageComputeClient(): ImageComputeClient {
   if (!singleton) singleton = new ImageComputeClient()
   return singleton
 }
+
+/**
+ * 由原始文件生成缩放后的图片 data URL。
+ * 缩略图用 JPEG 低质量（小、存库）；源图用较高质量（可重放二值化）。
+ */
+async function imageToDataUrl(file: File, maxSize: number, quality: number): Promise<string> {
+  const bitmap = await createImageBitmap(file)
+  const ratio = Math.min(1, maxSize / Math.max(bitmap.width, bitmap.height))
+  const width = Math.max(1, Math.round(bitmap.width * ratio))
+  const height = Math.max(1, Math.round(bitmap.height * ratio))
+  const canvas = document.createElement('canvas')
+  canvas.width = width
+  canvas.height = height
+  const ctx = canvas.getContext('2d')
+  if (!ctx) throw new Error('无法创建 canvas 上下文')
+  ctx.drawImage(bitmap, 0, 0, width, height)
+  bitmap.close?.()
+  return canvas.toDataURL('image/jpeg', quality)
+}
+
+/** 生成小尺寸缩略图 data URL（用于时间线的帧缩略图并随项目持久化） */
+export function createThumbnail(file: File, maxSize = 96): Promise<string> {
+  return imageToDataUrl(file, maxSize, 0.7)
+}
+
+/**
+ * 生成降采样源图 data URL（最长边 ≤1600），用于帧编辑时重放二值化 / 重新采样。
+ * 与 compute worker 解码尺寸一致，保证重新生成结果可复现。
+ */
+export function createSourceImage(file: File, maxSize = 1600): Promise<string> {
+  return imageToDataUrl(file, maxSize, 0.85)
+}

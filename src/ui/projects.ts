@@ -9,7 +9,9 @@ import { ref } from 'vue'
 import { editor, projectName } from './editor'
 import { toast } from './toast'
 import { DataService } from '../data/service'
-import type { Point, ProjectMeta } from '../core/types'
+import { setRenders } from '../render/renderStore'
+import type { RenderPayload } from '../core/transition'
+import type { Frame, Point, ProjectMeta } from '../core/types'
 
 export const service = new DataService(editor)
 
@@ -37,6 +39,17 @@ service.events.on('projects', (list) => {
 })
 service.events.on('info', (message) => toast(message, 'info'))
 service.events.on('error', (message) => toast(message, 'error', 5000))
+// 过渡产物：打开项目 / 保存后把持久化产物载入内存缓存
+service.events.on('renders', (records) => {
+  const entries: Array<[string, RenderPayload | null]> = records.map((r) => {
+    try {
+      return [r.transitionId, JSON.parse(r.payload) as RenderPayload]
+    } catch {
+      return [r.transitionId, null]
+    }
+  })
+  setRenders(entries)
+})
 
 // 启动即初始化数据库 Worker
 void service.init()
@@ -53,7 +66,7 @@ async function ensureSaved(): Promise<boolean> {
   if (!dirty.value) return true
   if (window.confirm('当前项目有未保存的修改，是否先保存？')) {
     await saveProject()
-    return !dirty.value // 保存流程被取消（如没填项目名）则中止
+    return !dirty.value
   }
   return window.confirm('不保存并继续？未保存的修改将丢失')
 }
@@ -68,7 +81,7 @@ export async function createNewProject(name: string): Promise<void> {
   }
 }
 
-/** 正在打开的项目 id，用于在列表项上显示忙碌态（不整体隐藏列表） */
+/** 正在打开的项目 id，用于在列表项上显示忙碌态 */
 export const openingId = ref<string | null>(null)
 
 export async function openProject(id: string): Promise<void> {
@@ -105,12 +118,16 @@ export async function importFromFile(file: File): Promise<void> {
   await service.importFile(file)
 }
 
-/** 载入一批点作为新项目。返回是否已应用（供调用方决定是否关闭弹窗）。 */
-export async function loadPointsAsProject(points: Point[], name: string): Promise<boolean> {
+/**
+ * 把一张图片生成的点位作为**新帧**追加到当前项目的时间线。
+ * 若项目尚未落库（首次导入），先创建项目再追加，保证自动保存能写入。
+ */
+export async function appendImage(frame: Frame, points: Point[]): Promise<boolean> {
   if (!(await ensureSaved())) return false
   loading.value = true
   try {
-    await service.loadPointsAsProject(points, name)
+    if (!currentProjectId.value) await service.saveNow()
+    editor.addFrame(frame, points)
     return true
   } finally {
     loading.value = false

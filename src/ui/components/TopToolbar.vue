@@ -2,30 +2,31 @@
 /**
  * 顶部工具栏：编辑操作的集中入口。
  *
- * 大部分操作直接调用共享的 editor 单例；仅「适配视图 / 生成测试数据 /
- * 导入图片」这三个需要访问渲染器或弹窗的能力，通过 emit 上调给 App 处理，
- * 从而让本组件保持为纯 UI、不依赖 Pixi 与项目数据层。
+ * 大部分操作直接调用共享的 editor 单例；仅「适配视图」需要访问渲染器，
+ * 通过 emit 上调给 App 处理，从而让本组件保持为纯 UI、不依赖 Pixi 与项目数据层。
  */
 import { ref } from 'vue'
 import {
   addPointAtViewCenter,
   canRedo,
   canUndo,
+  droneCount,
   editor,
+  pointRadius,
   redoLabel,
   renderQuality,
   selectedCount,
+  setDroneCount,
+  setPointRadius,
   setRenderQuality,
   undoLabel,
 } from '../editor'
 import type { RenderQuality } from '../../render/renderer'
 import { toast } from '../toast'
 
-// 向上冒泡的交互意图（由 App 承接需要渲染器/弹窗支持的操作）
+// 向上冒泡的交互意图（由 App 承接需要渲染器支持的操作）
 const emit = defineEmits<{
   (e: 'fit'): void
-  (e: 'generate', count: number): void
-  (e: 'import-image'): void
 }>()
 
 // 取色器当前颜色，默认主题蓝；仅在选择点位后「应用」才有意义
@@ -34,6 +35,18 @@ const color = ref('#4ea1ff')
 /** 画质下拉变更：把 DOM 的字符串值收窄为 RenderQuality 后交给桥接层 */
 function onQualityChange(e: Event): void {
   setRenderQuality((e.target as HTMLSelectElement).value as RenderQuality)
+}
+
+/** 无人机总数变更（写入项目参数） */
+function onDroneCountChange(e: Event): void {
+  const value = Number((e.target as HTMLInputElement).value)
+  if (Number.isFinite(value) && value > 0) setDroneCount(value)
+}
+
+/** 点半径变更（世界单位/米） */
+function onPointRadiusChange(e: Event): void {
+  const value = Number((e.target as HTMLInputElement).value)
+  if (Number.isFinite(value) && value > 0) setPointRadius(value)
 }
 
 /** 将取色器颜色应用到当前选中点；未选中时给出提示而非静默失败 */
@@ -98,7 +111,7 @@ function applyColor(): void {
 
     <div class="spacer" />
 
-    <!-- 区域：画质档位与测试数据 / 图片导入入口 -->
+    <!-- 区域：画质档位与无人机总数 -->
     <div class="group">
       <label class="label">画质</label>
       <select :value="renderQuality" @change="onQualityChange">
@@ -107,8 +120,24 @@ function applyColor(): void {
         <option value="balanced">均衡（75%）</option>
         <option value="fast">流畅（50%）</option>
       </select>
-      <button @click="emit('generate', 20000)">生成 20,000 点测试数据</button>
-      <button @click="emit('import-image')">导入图片生成点位</button>
+      <label class="label">无人机总数</label>
+      <input
+        class="num"
+        type="number"
+        min="1"
+        step="1"
+        :value="droneCount"
+        @change="onDroneCountChange"
+      />
+      <label class="label">点半径(米)</label>
+      <input
+        class="num"
+        type="number"
+        min="0.05"
+        step="0.1"
+        :value="pointRadius"
+        @change="onPointRadiusChange"
+      />
     </div>
   </header>
 </template>
@@ -131,6 +160,9 @@ function applyColor(): void {
 .label {
   color: var(--text-dim);
   font-size: 13px;
+}
+.num {
+  width: 76px;
 }
 .divider {
   width: 1px;

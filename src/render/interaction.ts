@@ -18,7 +18,6 @@
  */
 import type { EditorStore } from '../state/store'
 import type { PixiRenderer } from '../render/renderer'
-import { POINT_RADIUS } from '../render/renderer'
 import { pointInPolygon, polygonBounds, type Polygon } from '../core/geometry'
 import type { PositionUpdate, Rect } from '../core/types'
 
@@ -111,7 +110,7 @@ export class InteractionController {
   /** 命中测试：返回屏幕坐标下最近的点 id */
   private pick(screen: ScreenPos): string | null {
     const world = this.renderer.viewport.screenToWorld(screen.x, screen.y)
-    const pickRadius = POINT_RADIUS + 6 / this.renderer.viewport.scale
+    const pickRadius = this.renderer.getPointRadius() + 6 / this.renderer.viewport.scale
     const r2 = pickRadius * pickRadius
     const candidates = this.store.getSpatial().queryCircle(world.x, world.y, pickRadius)
     let bestId: string | null = null

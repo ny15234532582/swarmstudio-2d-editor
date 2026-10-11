@@ -1,51 +1,105 @@
 <script setup lang="ts">
 /**
- * 应用根组件：编辑器页面外壳与生命周期编排。
+ * 根组件：挂载渲染器与交互控制器、承载时间线布局、驱动过渡播放，
+ * 并处理全局快捷键与窗口错误兜底。
  *
- * 职责：
- * - 在挂载时创建 PixiJS 渲染器与交互控制器，并绑定到画布宿主元素；
- * - 把「视口中心」「画质控制器」等能力注入 UI 桥接层（ui/editor），
- *   使工具栏/状态栏等纯 UI 组件无需直接依赖渲染器；
- * - 注册全局键盘快捷键（撤销/重做、保存、删除、取消选择）；
- * - 注册 window error 兜底与卸载时清理监听，避免内存泄漏。
+ * 播放使用「过渡产物」（内存缓存），不再逐帧匹配。
  */
-import { onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { PixiRenderer } from './render/renderer'
 import { InteractionController } from './render/interaction'
-import { editor, setQualityController, setViewportCenterProvider, updateRenderInfo } from './ui/editor'
-import { loadPointsAsProject, refreshProjects, saveProject } from './ui/projects'
-import { generatePoints } from './core/testdata'
+import {
+  editor,
+  pointRadius,
+  setPointRadiusController,
+  setQualityController,
+  setViewportCenterProvider,
+  showTrails,
+  transitions,
+  updateRenderInfo,
+} from './ui/editor'
+import { refreshProjects, saveProject } from './ui/projects'
+import { buildTimeline, sampleRenderSegment, segmentAt, trailsFromRender, type RenderPayload } from './core/transition'
+import {
+  getRender,
+  hasAllRenders,
+  renderRevision,
+  selectedRenderId,
+} from './render/renderStore'
 import TopToolbar from './ui/components/TopToolbar.vue'
 import ProjectPanel from './ui/components/ProjectPanel.vue'
 import StatusBar from './ui/components/StatusBar.vue'
 import ToastHost from './ui/components/ToastHost.vue'
 import ImageImportDialog from './ui/components/ImageImportDialog.vue'
+import Timeline from './ui/components/Timeline.vue'
+import TransitionEditor from './ui/components/TransitionEditor.vue'
 
-// 渲染器挂载的画布宿主（模板 ref）
 const canvasHost = ref<HTMLElement>()
-// 渲染器上报的实时帧率，透传给状态栏
 const fps = ref(0)
-// 图片导入弹窗的显隐（v-model:open）
+const viewportScale = ref(1)
 const imageDialogOpen = ref(false)
+// 正在编辑的帧 id；为空表示「新增帧」模式
+const editingFrameId = ref<string | null>(null)
+// 过渡编辑抽屉状态：null=关闭；new=新建草稿；edit=修改已有过渡
+const transitionEditor = ref<{
+  mode: 'new' | 'edit'
+  transitionId?: string
+  fromFrameId?: string
+  toFrameId?: string
+} | null>(null)
+const selectedTransitionId = computed(() => transitionEditor.value?.transitionId ?? null)
 
-// 渲染器/交互控制器实例；非响应式，仅做生命周期持有
+// 时间线播放状态
+const currentTime = ref(0)
+const playing = ref(false)
+let playEnd = 0
+let rafId = 0
+let lastTs = 0
+// 抽屉里「预览」的独立播放（不依赖时间线区段，草稿也能播）
+let previewRaf = 0
+let previewStart = 0
+let previewDuration = 0
+
 let renderer: PixiRenderer | null = null
 let interaction: InteractionController | null = null
-// window error 的事件节流计时器，避免同一异常风暴反复触发
 let errorTimer: number | null = null
+
+/** 全部过渡是否都已生成产物（决定能否播放整条时间线） */
+const canPlay = computed(() => {
+  renderRevision.value
+  const ids = transitions.value.map((t) => t.id)
+  return ids.length > 0 && hasAllRenders(ids)
+})
+
+/** 取“好看”的整数（1/2/5×10ⁿ） */
+function niceRound(x: number): number {
+  if (x <= 0) return 1
+  const p = Math.pow(10, Math.floor(Math.log10(x)))
+  const n = x / p
+  const f = n < 1.5 ? 1 : n < 3.5 ? 2 : n < 7.5 ? 5 : 10
+  return f * p
+}
+
+/** 比例尺：约 100px 对应的“好看”米数（世界单位=米） */
+const scaleBar = computed(() => {
+  const scale = viewportScale.value
+  const meters = niceRound(100 / Math.max(1e-6, scale))
+  return { meters, px: meters * scale }
+})
 
 onMounted(async () => {
   const host = canvasHost.value
   if (!host) return
 
-  // 1) 初始化渲染器并接管 FPS / 分辨率回调
   renderer = new PixiRenderer(editor)
   renderer.onFps = (value) => (fps.value = value)
   renderer.onRenderInfo = (info) => updateRenderInfo(info)
+  renderer.onViewport = (scale) => (viewportScale.value = scale)
   await renderer.init(host)
   setQualityController(renderer)
+  setPointRadiusController((r) => renderer!.setPointRadius(r))
+  renderer.setPointRadius(pointRadius.value)
 
-  // 2) 创建交互控制器（滚轮缩放、平移、框选、拖动等）
   interaction = new InteractionController(
     editor,
     renderer,
@@ -53,7 +107,6 @@ onMounted(async () => {
     host,
   )
 
-  // 3) 注入视口中心换算：屏幕坐标 → 世界坐标
   setViewportCenterProvider(() => {
     const app = renderer!.app!
     const vp = renderer!.viewport
@@ -63,23 +116,144 @@ onMounted(async () => {
     }
   })
 
-  // 4) 全局监听与项目列表加载
   window.addEventListener('keydown', onKeyDown)
   window.addEventListener('error', onWindowError)
   await refreshProjects()
+  updateTrails()
 })
 
+// --------------------------------------------------------------- 飞行轨迹
+
+/** 由当前预览/选中的**产物**画半透明轨迹 */
+function updateTrails(): void {
+  const r = renderer
+  if (!r) return
+  const render = getRender(selectedRenderId.value)
+  if (!render || !showTrails.value) {
+    r.clearTrails()
+    return
+  }
+  r.showTrails(trailsFromRender(render))
+}
+
+watch([selectedRenderId, showTrails, renderRevision], () => updateTrails())
+
 onBeforeUnmount(() => {
-  // 对称清理：先解绑全局监听，再销毁交互与渲染资源
   window.removeEventListener('keydown', onKeyDown)
   window.removeEventListener('error', onWindowError)
+  stopPlayback()
   interaction?.destroy()
   renderer?.destroy()
   interaction = null
   renderer = null
 })
 
-/** 判断事件目标是否为文本输入控件：这些控件内不应劫持键盘快捷键 */
+// --------------------------------------------------------------- 播放
+
+function renderAt(time: number): void {
+  if (!renderer) return
+  const seg = segmentAt(buildTimeline(editor.track).segments, time)
+  if (!seg) {
+    renderer.clearPreview()
+    return
+  }
+  if (seg.kind === 'hold') {
+    const pts = editor.getFramePoints(seg.frameId)
+    renderer.showPreview(pts.map((p) => ({ x: p.x, y: p.y, r: p.r, g: p.g, b: p.b, alpha: 1 })))
+    return
+  }
+  const render = getRender(seg.transitionId)
+  if (!render) {
+    renderer.clearPreview()
+    return
+  }
+  const t = seg.end > seg.start ? (time - seg.start) / (seg.end - seg.start) : 1
+  renderer.showPreview(sampleRenderSegment(render, t))
+}
+
+function tick(ts: number): void {
+  if (!playing.value) return
+  const dt = (ts - lastTs) / 1000
+  lastTs = ts
+  let t = currentTime.value + dt
+  if (t >= playEnd) {
+    t = playEnd
+    currentTime.value = t
+    renderAt(t)
+    stopPlayback()
+    return
+  }
+  currentTime.value = t
+  renderAt(t)
+  rafId = requestAnimationFrame(tick)
+}
+
+function stopPlayback(): void {
+  playing.value = false
+  if (rafId) cancelAnimationFrame(rafId)
+  rafId = 0
+  if (previewRaf) cancelAnimationFrame(previewRaf)
+  previewRaf = 0
+  renderer?.clearPreview()
+}
+
+/** 独立播放一份产物（不移动播放头；草稿态也能播） */
+function playRenderPreview(render: RenderPayload): void {
+  stopPlayback()
+  previewDuration = Math.max(0.1, render.duration + render.stagger)
+  previewStart = performance.now()
+  const step = (ts: number) => {
+    const t = Math.min(1, (ts - previewStart) / (previewDuration * 1000))
+    renderer?.showPreview(sampleRenderSegment(render, t))
+    if (t < 1) previewRaf = requestAnimationFrame(step)
+    else {
+      previewRaf = 0
+      renderer?.clearPreview()
+    }
+  }
+  previewRaf = requestAnimationFrame(step)
+}
+
+function onTogglePlay(): void {
+  if (playing.value) {
+    stopPlayback()
+    return
+  }
+  if (!canPlay.value) return
+  const total = buildTimeline(editor.track).duration
+  if (total <= 0) return
+  if (currentTime.value >= total) currentTime.value = 0
+  playEnd = total
+  playing.value = true
+  lastTs = performance.now()
+  rafId = requestAnimationFrame(tick)
+}
+
+/** 预览并播放某个过渡的产物（草稿态也可） */
+function onPreviewTransition(transitionId: string): void {
+  const render = getRender(transitionId)
+  if (!render) return
+  playRenderPreview(render)
+}
+
+/** 拖动/点击播放头：停留段切到该帧并退出预览，过渡段显示插值 */
+function onSeek(time: number): void {
+  currentTime.value = time
+  if (playing.value) {
+    renderAt(time)
+    return
+  }
+  const seg = segmentAt(buildTimeline(editor.track).segments, time)
+  if (seg?.kind === 'hold') {
+    renderer?.clearPreview()
+    if (seg.frameId !== editor.activeFrameIdValue) editor.setActiveFrame(seg.frameId)
+  } else {
+    renderAt(time)
+  }
+}
+
+// --------------------------------------------------------------- 快捷键
+
 function isTypingTarget(target: EventTarget | null): boolean {
   const el = target as HTMLElement | null
   if (!el) return false
@@ -87,7 +261,6 @@ function isTypingTarget(target: EventTarget | null): boolean {
   return tag === 'INPUT' || tag === 'TEXTAREA' || el.isContentEditable
 }
 
-/** 全局快捷键分发：输入框中直接放行；mod = Cmd(mac)/Ctrl(win) */
 function onKeyDown(e: KeyboardEvent): void {
   if (isTypingTarget(e.target)) return
   const mod = e.metaKey || e.ctrlKey
@@ -103,7 +276,6 @@ function onKeyDown(e: KeyboardEvent): void {
     void saveProject()
     return
   }
-  // Delete / Backspace 仅在确有选中时拦截，避免影响浏览器默认行为
   if (e.key === 'Delete' || e.key === 'Backspace') {
     if (editor.selectedCount > 0) {
       e.preventDefault()
@@ -118,44 +290,71 @@ function onKeyDown(e: KeyboardEvent): void {
 
 /** window error 全局兜底：用 300ms 窗口节流，防止级联错误刷屏 */
 function onWindowError(): void {
-  // 兜底：避免未捕获异常静默失败，给出可见提示
   if (errorTimer !== null) window.clearTimeout(errorTimer)
   errorTimer = window.setTimeout(() => (errorTimer = null), 300)
 }
 
-/** 工具栏「适配视图」：把全部点位缩放到可视区域内 */
 function onFit(): void {
   renderer?.fitView()
 }
 
-/** 工具栏「生成测试数据」：生成指定数量的随机点并作为新项目载入 */
-function onGenerate(count: number): void {
-  const points = generatePoints({ count })
-  loadPointsAsProject(points, `${count} 点测试项目`)
+/** 时间线「＋ 新增帧」：打开图片导入弹窗（新增模式） */
+function onAddFrame(): void {
+  editingFrameId.value = null
+  imageDialogOpen.value = true
 }
 
-/** 工具栏「导入图片」：打开图片导入弹窗 */
-function onImportImage(): void {
+/** 点击帧块：打开帧编辑弹窗 */
+function onEditFrame(frameId: string): void {
+  editingFrameId.value = frameId
   imageDialogOpen.value = true
+}
+
+/** 两帧之间点「+」：打开过渡配置（草稿） */
+function onNewTransition(payload: { fromFrameId: string; toFrameId: string }): void {
+  transitionEditor.value = { mode: 'new', ...payload }
+}
+
+/** 点击过渡段：修改已有过渡 */
+function onSelectTransition(transitionId: string): void {
+  transitionEditor.value = { mode: 'edit', transitionId }
 }
 </script>
 
 <template>
   <div class="app">
-    <!-- 顶部工具栏：点/组/锁定/撤销/画质等操作入口 -->
-    <TopToolbar @fit="onFit" @generate="onGenerate" @import-image="onImportImage" />
+    <TopToolbar @fit="onFit" />
     <div class="body">
-      <!-- 左侧项目面板 -->
       <ProjectPanel />
-      <!-- 中间主画布：Pixi 渲染器挂载于此 -->
-      <main ref="canvasHost" class="canvas-host" />
+      <div class="workspace">
+        <main ref="canvasHost" class="canvas-host">
+          <div class="scalebar">
+            <div class="bar" :style="{ width: scaleBar.px + 'px' }" />
+            <span>{{ scaleBar.meters }} m</span>
+          </div>
+        </main>
+        <Timeline
+          :current-time="currentTime"
+          :playing="playing"
+          :selected-transition-id="selectedTransitionId"
+          :can-play="canPlay"
+          @seek="onSeek"
+          @toggle-play="onTogglePlay"
+          @add-frame="onAddFrame"
+          @edit-frame="onEditFrame"
+          @select-transition="onSelectTransition"
+          @new-transition="onNewTransition"
+        />
+      </div>
+      <TransitionEditor
+        :state="transitionEditor"
+        @close="transitionEditor = null"
+        @preview="onPreviewTransition"
+      />
     </div>
-    <!-- 底部状态栏：点数/选中/FPS/保存状态 -->
     <StatusBar :fps="fps" />
-    <!-- 全局 Toast 出口 -->
     <ToastHost />
-    <!-- 图片导入弹窗（v-model:open 双向绑定显隐） -->
-    <ImageImportDialog v-model:open="imageDialogOpen" />
+    <ImageImportDialog v-model:open="imageDialogOpen" :frame-id="editingFrameId" />
   </div>
 </template>
 
@@ -170,6 +369,13 @@ function onImportImage(): void {
   display: flex;
   min-height: 0;
 }
+.workspace {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
 .canvas-host {
   position: relative;
   flex: 1;
@@ -178,5 +384,25 @@ function onImportImage(): void {
 }
 .canvas-host :deep(canvas) {
   display: block;
+}
+.scalebar {
+  position: absolute;
+  left: 12px;
+  bottom: 10px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  pointer-events: none;
+  color: rgba(220, 230, 245, 0.85);
+  font-size: 11px;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
+}
+.scalebar .bar {
+  height: 7px;
+  border: 1px solid rgba(220, 230, 245, 0.85);
+  border-top: none;
+  background: rgba(220, 230, 245, 0.12);
+  box-sizing: border-box;
 }
 </style>

@@ -17,6 +17,7 @@
  * 关键步骤见文件内注释；脚本以 JSON 打印结果，不抛非零退出码。
  */
 import puppeteer from 'puppeteer-core'
+import { injectTestPoints } from './smoke-utils.mjs'
 
 // 被测地址、Chrome 路径及通用工具
 const url = process.argv[2] || 'http://localhost:4173/'
@@ -56,10 +57,8 @@ try {
   await page.goto(url, { waitUntil: 'domcontentloaded' })
   await sleep(2500)
 
-  // 先生成一批测试点位作为选择对象
-  await page.evaluate(() => {
-    ;[...document.querySelectorAll('button')].find((b) => b.textContent?.includes('生成'))?.click()
-  })
+  // 先注入一批测试点位作为选择对象（旧的「生成测试数据」按钮已移除）
+  await injectTestPoints(page, 20000)
   await sleep(3500)
 
   // 获取画布相对视口的矩形，用于把交互坐标换算到屏幕坐标；cx/cy 为画布中心

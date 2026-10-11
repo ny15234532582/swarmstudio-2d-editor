@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   analyze,
   buildMask,
-  computeStep,
+  spacingToStep,
   generatePoints,
   luma,
   type BinarizeParams,
@@ -33,7 +33,7 @@ const BLACK: number[] = [0, 0, 0]
 const base: BinarizeParams = {
   threshold: 128,
   invert: false,
-  targetPoints: 20000,
+  minSpacing: 1,
   colorMode: 'source',
   fixedColor: { r: 10, g: 20, b: 30 },
   worldWidth: 1200,
@@ -81,25 +81,47 @@ describe('imageProcessor', () => {
     expect(fixed[0]).toMatchObject({ r: 10, g: 20, b: 30 })
   })
 
-  it('抽稀步长按目标点数计算', () => {
-    expect(computeStep(0, 100)).toBe(1)
-    expect(computeStep(10000, 10000)).toBe(1)
-    expect(computeStep(40000, 10000)).toBe(2)
-    expect(computeStep(160000, 10000)).toBe(4)
+  it('按最小间距换算步长并向上取整', () => {
+    // stepPx = ceil(minSpacing * srcWidth / worldWidth)
+    expect(spacingToStep(1200, 1200, 1)).toBe(1)
+    expect(spacingToStep(1200, 1200, 2)).toBe(2)
+    expect(spacingToStep(1200, 1200, 1.1)).toBe(2) // ceil(1.1) = 2
+    // 步长下限为 1（不做上采样）；非法尺寸兜底为 1
+    expect(spacingToStep(1200, 1200, 0.1)).toBe(1)
+    expect(spacingToStep(0, 1200, 5)).toBe(1)
   })
 
-  it('目标点数更小时生成更少的点', () => {
+  it('最小间距越大生成的点越少', () => {
     const full = image([
       [WHITE, WHITE, WHITE, WHITE],
       [WHITE, WHITE, WHITE, WHITE],
       [WHITE, WHITE, WHITE, WHITE],
       [WHITE, WHITE, WHITE, WHITE],
     ])
-    const many = analyze(full, { ...base, targetPoints: 10000 })
-    const few = analyze(full, { ...base, targetPoints: 1 })
-    expect(many.pointCount).toBe(16)
-    expect(many.step).toBe(1)
-    expect(few.pointCount).toBe(1)
-    expect(few.step).toBe(4)
+    const dense = analyze(full, { ...base, minSpacing: 1 })
+    const sparse = analyze(full, { ...base, minSpacing: 3000 })
+    expect(dense.pointCount).toBe(16)
+    expect(dense.step).toBe(1)
+    expect(sparse.pointCount).toBe(1)
+    expect(sparse.step).toBe(10) // ceil(3000 * 4 / 1200) = 10
+  })
+
+  it('生成点的任意两两间距不小于最小间距（世界单位）', () => {
+    const full = image(
+      Array.from({ length: 8 }, () => Array.from({ length: 8 }, () => WHITE)),
+    )
+    // worldWidth=1200, 宽 8 → scale=150；minSpacing=200 → step=ceil(200*8/1200)=2
+    const params = { ...base, minSpacing: 200 }
+    const points = generatePoints(full, params)
+    expect(points.length).toBeGreaterThan(0)
+    let minDist = Infinity
+    for (let i = 0; i < points.length; i++) {
+      for (let j = i + 1; j < points.length; j++) {
+        const dx = points[i].x - points[j].x
+        const dy = points[i].y - points[j].y
+        minDist = Math.min(minDist, Math.hypot(dx, dy))
+      }
+    }
+    expect(minDist).toBeGreaterThanOrEqual(params.minSpacing)
   })
 })

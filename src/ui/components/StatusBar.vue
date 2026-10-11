@@ -5,7 +5,7 @@
  * 数据全部来自响应式的 ui/editor 与 ui/projects 桥接层，组件本身无状态、
  * 不发事件；FPS 由父组件 App 透传（它来自渲染器 ticker）。
  */
-import { pointCount, renderInfo, selectedCount } from '../editor'
+import { activePointCount, droneCount, pointCount, renderInfo, selectedCount } from '../editor'
 import { currentProjectId, dirty, lastSavedAt, saving, storageMode } from '../projects'
 
 // 交互方式提示文案（静态，放在此处便于统一维护）
@@ -25,6 +25,7 @@ function savedText(ts: number | null): string {
 <template>
   <footer class="status">
     <!-- 区域：计数与性能指标 -->
+    <span>当前帧点数：<b>{{ activePointCount }}</b> / {{ droneCount }}</span>
     <span>总点数：<b>{{ pointCount }}</b></span>
     <span>已选中：<b>{{ selectedCount }}</b></span>
     <span class="sep">|</span>

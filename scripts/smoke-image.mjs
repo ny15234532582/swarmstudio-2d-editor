@@ -61,7 +61,7 @@ try {
   await sleep(2500)
 
   log('open dialog')
-  await clickByText('导入图片生成点位')
+  await clickByText('新增帧')
   await sleep(400)
 
   log('inject a test image (white circle on black)')
@@ -113,12 +113,12 @@ try {
   // 从对话框文本中提取识别结果与将生成的点数等断言信息
   const stat = await text()
   result.recognized = line(stat, '识别像素')
-  result.willGenerate = line(stat, '将生成')
+  result.willGenerate = line(stat, '预计无人机数')
   result.stepLine = line(stat, '采样步长')
 
   log('confirm generate')
-  // 确认生成并载入，等待点位写入画布与项目列表更新
-  await clickByText('生成并载入')
+  // 确认生成并添加帧，等待点位写入画布与项目列表更新
+  await clickByText('生成并添加帧')
   await sleep(2500)
 
   const after = await text()

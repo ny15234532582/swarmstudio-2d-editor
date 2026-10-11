@@ -53,6 +53,14 @@ function createFakeCtx(): { ctx: OperationContext; map: Map<string, Point> } {
         else delete p.locked
       }
     },
+    addFrame() {},
+    removeFrame() {},
+    updateFrame() {},
+    setFrameDuration() {},
+    moveFrame() {},
+    addTransition() {},
+    updateTransition() {},
+    removeTransition() {},
   }
   return { ctx, map }
 }

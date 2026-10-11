@@ -10,16 +10,16 @@
  *   不重建、不全量重绘。
  * - 选中高亮放在独立容器，避免与点位互相影响层级。
  */
-import { Application, Container, Sprite, Texture } from 'pixi.js'
+import { Application, Container, Graphics, Sprite, Texture } from 'pixi.js'
 import type { EditorStore } from '../state/store'
 import type { Point } from '../core/types'
+import type { MotionSample } from '../core/transition'
 import { Viewport, clamp } from './viewport'
 
-/** 点在世界坐标下的显示半径 */
+/** 点在世界坐标下的默认显示半径 */
 export const POINT_RADIUS = 4
 /** 点纹理半径（越大，放大后越清晰；纹理仅生成一次） */
 const TEXTURE_RADIUS = 16
-const RING_RADIUS = POINT_RADIUS + 3
 const RING_TEXTURE_RADIUS = 16
 /** 锁定点的透明度：一眼可辨「不可编辑」 */
 const LOCKED_ALPHA = 0.28
@@ -65,8 +65,14 @@ export class PixiRenderer {
   readonly viewport = new Viewport()
   app: Application | null = null
   private world = new Container()
+  /** 半透明飞行轨迹层（画在点位之下） */
+  private trailLayer = new Container()
+  private trailGraphics = new Graphics()
   private pointsLayer = new Container()
   private ringLayer = new Container()
+  /** 过渡预览层：播放过渡时用它显示插值位置（最多 N 个临时 Sprite） */
+  private previewLayer = new Container()
+  private previewSprites: Sprite[] = []
 
   private pointTexture!: Texture
   private ringTexture!: Texture
@@ -81,11 +87,15 @@ export class PixiRenderer {
   private host: HTMLElement | null = null
   private quality: RenderQuality = 'auto'
   private autoScale = 1
+  /** 点的显示半径（世界单位/米），可配置 */
+  private pointRadius = POINT_RADIUS
 
   private frames = 0
   private lastFpsSample = 0
   onFps: ((fps: number) => void) | null = null
   onRenderInfo: ((info: RenderInfo) => void) | null = null
+  /** 视口缩放变化回调（供比例尺显示） */
+  onViewport: ((scale: number) => void) | null = null
 
   constructor(private store: EditorStore) {}
 
@@ -115,7 +125,10 @@ export class PixiRenderer {
     host.appendChild(app.canvas)
 
     app.stage.addChild(this.world)
-    this.world.addChild(this.pointsLayer, this.ringLayer)
+    this.trailLayer.addChild(this.trailGraphics)
+    this.world.addChild(this.trailLayer, this.pointsLayer, this.ringLayer, this.previewLayer)
+    this.previewLayer.visible = false
+    this.trailLayer.visible = false
 
     this.pointTexture = this.createCircleTexture(TEXTURE_RADIUS, 0xffffff)
     this.ringTexture = this.createRingTexture()
@@ -128,6 +141,7 @@ export class PixiRenderer {
 
     app.ticker.add(() => this.sampleFps())
     this.emitRenderInfo()
+    this.onViewport?.(this.viewport.scale)
   }
 
   // ------------------------------------------------------------- 质量档位
@@ -141,6 +155,29 @@ export class PixiRenderer {
 
   getQuality(): RenderQuality {
     return this.quality
+  }
+
+  /** 当前点的显示半径（世界单位/米） */
+  getPointRadius(): number {
+    return this.pointRadius
+  }
+
+  /** 设置点的显示半径（米），并即时更新已有点 / 选中环 / 预览点 */
+  setPointRadius(radius: number): void {
+    const r = Math.max(0.05, radius)
+    if (r === this.pointRadius) return
+    this.pointRadius = r
+    const scale = r / TEXTURE_RADIUS
+    for (const s of this.sprites.values()) s.scale.set(scale)
+    for (const s of this.previewSprites) s.scale.set(scale)
+    const ringScale = this.ringRadius() / RING_TEXTURE_RADIUS
+    for (const s of this.rings.values()) s.scale.set(ringScale)
+    for (const s of this.ringPool) s.scale.set(ringScale)
+  }
+
+  /** 选中高亮环的半径（随点半径变化，保证环比点略大） */
+  private ringRadius(): number {
+    return this.pointRadius + Math.max(1.5, this.pointRadius * 0.6)
   }
 
   /**
@@ -266,6 +303,12 @@ export class PixiRenderer {
         }
       }),
       events.on('selection:change', () => this.syncRings()),
+      // 切换当前帧：重建为该帧的点位
+      events.on('activeFrame:change', () => {
+        this.clearPreview()
+        this.rebuildAll()
+        this.fitView()
+      }),
     )
   }
 
@@ -274,7 +317,7 @@ export class PixiRenderer {
   private createSprite(p: Point): Sprite {
     const sprite = new Sprite(this.pointTexture)
     sprite.anchor.set(0.5)
-    sprite.scale.set(POINT_RADIUS / TEXTURE_RADIUS)
+    sprite.scale.set(this.pointRadius / TEXTURE_RADIUS)
     sprite.x = p.x
     sprite.y = p.y
     sprite.tint = rgbToHex(p.r, p.g, p.b)
@@ -283,17 +326,83 @@ export class PixiRenderer {
     return sprite
   }
 
-  /** 全量重建（仅在加载项目时发生） */
+  /** 全量重建（加载项目 / 切换当前帧时发生）：只渲染当前帧的点 */
   private rebuildAll(): void {
     for (const sprite of this.sprites.values()) sprite.destroy()
     this.sprites.clear()
     this.pointsLayer.removeChildren()
 
-    for (const p of this.store.project.points) {
+    for (const p of this.store.getFramePoints(this.store.activeFrameIdValue)) {
       this.pointsLayer.addChild(this.createSprite(p))
     }
     this.recycleAllRings()
     this.syncRings()
+  }
+
+  // ------------------------------------------------------------- 过渡预览
+
+  /**
+   * 显示一帧「过渡采样」：用预览层临时 Sprite 渲染（最多 N 个），
+   * 期间隐藏常规点位层；不写回 store。
+   */
+  showPreview(samples: MotionSample[]): void {
+    this.pointsLayer.visible = false
+    this.ringLayer.visible = false
+    this.previewLayer.visible = true
+    while (this.previewSprites.length < samples.length) {
+      const sprite = new Sprite(this.pointTexture)
+      sprite.anchor.set(0.5)
+      sprite.scale.set(this.pointRadius / TEXTURE_RADIUS)
+      this.previewLayer.addChild(sprite)
+      this.previewSprites.push(sprite)
+    }
+    for (let i = 0; i < this.previewSprites.length; i++) {
+      const sprite = this.previewSprites[i]
+      const sample = samples[i]
+      if (!sample) {
+        sprite.visible = false
+        continue
+      }
+      sprite.visible = true
+      sprite.x = sample.x
+      sprite.y = sample.y
+      sprite.tint = rgbToHex(sample.r, sample.g, sample.b)
+      sprite.alpha = sample.alpha
+    }
+    this.applyViewport()
+  }
+
+  /** 退出预览，恢复显示当前帧的常规点位 */
+  clearPreview(): void {
+    if (!this.previewLayer.visible) return
+    this.previewLayer.visible = false
+    for (const sprite of this.previewSprites) sprite.visible = false
+    this.pointsLayer.visible = true
+    this.ringLayer.visible = true
+  }
+
+  // ------------------------------------------------------------- 飞行轨迹
+
+  /** 显示半透明飞行轨迹（世界坐标折线） */
+  showTrails(polylines: Array<Array<{ x: number; y: number }>>, color = 0x36c6ff): void {
+    const g = this.trailGraphics
+    g.clear()
+    for (const poly of polylines) {
+      if (poly.length < 2) continue
+      g.moveTo(poly[0].x, poly[0].y)
+      for (let i = 1; i < poly.length; i++) g.lineTo(poly[i].x, poly[i].y)
+    }
+    // 线更细更淡；条数越多越减淡，避免几千条叠加成一团
+    const n = polylines.length
+    const alpha = n > 5000 ? 0.04 : n > 2000 ? 0.06 : 0.1
+    g.stroke({ width: 0.35, color, alpha })
+    this.trailLayer.visible = true
+  }
+
+  /** 清除飞行轨迹 */
+  clearTrails(): void {
+    this.trailLayer.visible = false
+    this.trailGraphics.clear()
   }
 
   // ------------------------------------------------------------- 选中高亮
@@ -326,7 +435,7 @@ export class PixiRenderer {
     if (pooled) return pooled
     const ring = new Sprite(this.ringTexture)
     ring.anchor.set(0.5)
-    ring.scale.set(RING_RADIUS / RING_TEXTURE_RADIUS)
+    ring.scale.set(this.ringRadius() / RING_TEXTURE_RADIUS)
     this.ringLayer.addChild(ring)
     return ring
   }
@@ -352,6 +461,7 @@ export class PixiRenderer {
   applyViewport(): void {
     this.world.position.set(this.viewport.x, this.viewport.y)
     this.world.scale.set(this.viewport.scale)
+    this.onViewport?.(this.viewport.scale)
   }
 
   /** 根据点集包围盒适配视图 */

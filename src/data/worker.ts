@@ -88,6 +88,14 @@ function handle(request: Request): unknown {
     case 'deleteProject':
       repo.deleteProject(database, request.projectId)
       return undefined
+    case 'listRenders':
+      return repo.listRenders(database, request.projectId)
+    case 'saveRender':
+      repo.saveRender(database, request.projectId, request.render)
+      return undefined
+    case 'deleteRender':
+      repo.deleteRender(database, request.projectId, request.transitionId)
+      return undefined
     case 'applyChanges':
       repo.applyChanges(
         database,
@@ -95,15 +103,17 @@ function handle(request: Request): unknown {
         request.mutations,
         request.history,
         request.groups,
+        request.tracks,
       )
       return undefined
-    case 'replacePoints':
-      repo.replacePoints(
+    case 'replaceData':
+      repo.replaceData(
         database,
         request.projectId,
         request.points,
         request.history,
         request.groups,
+        request.tracks,
       )
       return undefined
   }

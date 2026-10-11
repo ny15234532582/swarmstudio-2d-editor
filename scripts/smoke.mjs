@@ -2,7 +2,7 @@
  * smoke.mjs — 编辑器端到端（E2E）无头冒烟测试
  *
  * 用途：在真实浏览器中走通编辑器的核心闭环——加载后确认 SQLite 存储就绪、
- *       创建项目、生成测试数据、新增点并上色、等待自动保存、刷新重载、
+ *       创建项目、导入测试数据、新增点并上色、等待自动保存、刷新重载、
  *       重新打开项目（校验记录恢复与撤销状态）、删除项目（校验画布清空），
  *       最后输出断言结果与截图。
  *
@@ -18,6 +18,7 @@
  * 关键步骤见文件内注释；脚本以 JSON 打印结果，不抛非零退出码，需人工判读。
  */
 import puppeteer from 'puppeteer-core'
+import { injectTestPoints } from './smoke-utils.mjs'
 
 // 被测地址、Chrome 路径及通用工具；sleep 用于等待渲染/自动保存等异步完成
 const url = process.argv[2] || 'http://localhost:4173/'
@@ -73,9 +74,9 @@ try {
   await clickByText('创建')
   await sleep(800)
 
-  log('generate test data')
-  // 点击「生成」后等待 4s，让大批量点位完成生成/写入
-  await clickByText('生成')
+  log('import test data')
+  // 通过左侧「导入 JSON」注入 20000 个测试点（旧的「生成测试数据」按钮已移除）
+  result.injected = await injectTestPoints(page, 20000)
   await sleep(4000)
   result.afterGenerate = line(await text(), '总点数')
 
