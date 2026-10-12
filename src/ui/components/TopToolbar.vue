@@ -14,14 +14,11 @@ import {
   editor,
   pointRadius,
   redoLabel,
-  renderQuality,
   selectedCount,
   setDroneCount,
   setPointRadius,
-  setRenderQuality,
   undoLabel,
 } from '../editor'
-import type { RenderQuality } from '../../render/renderer'
 import { toast } from '../toast'
 
 // 向上冒泡的交互意图（由 App 承接需要渲染器支持的操作）
@@ -31,11 +28,6 @@ const emit = defineEmits<{
 
 // 取色器当前颜色，默认主题蓝；仅在选择点位后「应用」才有意义
 const color = ref('#4ea1ff')
-
-/** 画质下拉变更：把 DOM 的字符串值收窄为 RenderQuality 后交给桥接层 */
-function onQualityChange(e: Event): void {
-  setRenderQuality((e.target as HTMLSelectElement).value as RenderQuality)
-}
 
 /** 无人机总数变更（写入项目参数） */
 function onDroneCountChange(e: Event): void {
@@ -111,15 +103,8 @@ function applyColor(): void {
 
     <div class="spacer" />
 
-    <!-- 区域：画质档位与无人机总数 -->
+    <!-- 区域：无人机总数 / 点半径（画质固定自动，不暴露给用户） -->
     <div class="group">
-      <label class="label">画质</label>
-      <select :value="renderQuality" @change="onQualityChange">
-        <option value="auto">自动（动态分辨率）</option>
-        <option value="high">高（原生）</option>
-        <option value="balanced">均衡（75%）</option>
-        <option value="fast">流畅（50%）</option>
-      </select>
       <label class="label">无人机总数</label>
       <input
         class="num"
