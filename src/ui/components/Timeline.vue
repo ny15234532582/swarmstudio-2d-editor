@@ -7,8 +7,17 @@
  * - 过渡段：已存在则点击编辑（并在下方展开编辑器），不存在则显示「+」新增；
  * - 播放控制（播放/暂停）与时间显示由父组件（App）持有，本组件只发意图事件。
  */
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import { buildTimeline } from '../../core/transition'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { buildTimeline, sampleRenderSegment } from '../../core/transition'
+import { getRender, renderRevision } from '../../render/renderStore'
+import {
+  clearThumbnailCache,
+  computeBBox,
+  renderThumbnail,
+  unionBBox,
+  type BBox,
+  type PreviewPoint,
+} from '../../render/preview'
 import {
   activeFrameId,
   droneCount,
@@ -149,6 +158,174 @@ const ticks = computed(() => {
   return arr
 })
 
+// ---------------------------------------------------- 胶片条缩略图（剪映风格）
+
+/**
+ * 缩略图：渲染分辨率 = 显示尺寸 × SS（再缩小显示）→ 点更小更细。
+ * PREVIEW_H 为参考高度；渲染高度 = PREVIEW_H × SS。
+ */
+const PREVIEW_H = 66
+const SS = 3
+/** 数据结构变更后（防抖）自增，用于失效缓存；拖动过程中不实时重算 */
+const stripEpoch = ref(0)
+let stripTimer: number | undefined
+const pointCache = new Map<string, PreviewPoint[]>()
+const bboxCache = new Map<string, { bbox: BBox; aspect: number }>()
+watch([frames, transitions, renderRevision], () => {
+  window.clearTimeout(stripTimer)
+  stripTimer = window.setTimeout(() => {
+    pointCache.clear()
+    bboxCache.clear()
+    clearThumbnailCache()
+    stripEpoch.value++
+  }, 200)
+})
+onBeforeUnmount(() => window.clearTimeout(stripTimer))
+
+/** 取某帧点位（转成预览结构，按 epoch 记忆） */
+function framePreviewPoints(frameId: string): PreviewPoint[] {
+  const key = `${frameId}:${stripEpoch.value}`
+  let pts = pointCache.get(key)
+  if (!pts) {
+    pts = editor.getFramePoints(frameId).map((p) => ({ x: p.x, y: p.y, r: p.r, g: p.g, b: p.b }))
+    pointCache.set(key, pts)
+  }
+  return pts
+}
+
+/** 包围盒宽高比（限制在 [0.6, 6]，避免极端长条） */
+function aspectOf(bbox: BBox): number {
+  const w = bbox.maxX - bbox.minX
+  const h = bbox.maxY - bbox.minY
+  const a = h > 1e-9 ? w / h : 1
+  return Math.min(6, Math.max(0.6, a))
+}
+
+/** 某帧的包围盒 + 宽高比（按 epoch 记忆，避免重复扫描） */
+function frameBBox(id: string): { bbox: BBox; aspect: number } {
+  const key = `b:${id}:${stripEpoch.value}`
+  let v = bboxCache.get(key)
+  if (!v) {
+    const bbox = computeBBox(framePreviewPoints(id))
+    v = { bbox, aspect: aspectOf(bbox) }
+    bboxCache.set(key, v)
+  }
+  return v
+}
+
+/** 过渡两端并集的包围盒 + 宽高比（按 epoch 记忆） */
+function pairBBox(fromId: string, toId: string): { bbox: BBox; aspect: number } {
+  const key = `p:${fromId}>${toId}:${stripEpoch.value}`
+  let v = bboxCache.get(key)
+  if (!v) {
+    const bbox = unionBBox(frameBBox(fromId).bbox, frameBBox(toId).bbox)
+    v = { bbox, aspect: aspectOf(bbox) }
+    bboxCache.set(key, v)
+  }
+  return v
+}
+
+/** 采样某个进度的点位：有产物用产物，否则按索引直线插值近似 */
+function samplePoints(
+  render: ReturnType<typeof getRender>,
+  from: PreviewPoint[],
+  to: PreviewPoint[],
+  t: number,
+): PreviewPoint[] {
+  if (render) {
+    return sampleRenderSegment(render, t).map((s) => ({
+      x: s.x,
+      y: s.y,
+      r: s.r,
+      g: s.g,
+      b: s.b,
+      alpha: s.alpha,
+    }))
+  }
+  return from.map((p, k) => {
+    const q = to[k] ?? p
+    return {
+      x: p.x + (q.x - p.x) * t,
+      y: p.y + (q.y - p.y) * t,
+      r: Math.round(p.r + (q.r - p.r) * t),
+      g: Math.round(p.g + (q.g - p.g) * t),
+      b: Math.round(p.b + (q.b - p.b) * t),
+    }
+  })
+}
+
+/** 计算一个片段要平铺的胶片条：按自然方块大小铺满整段（张数不设上限） */
+function blockStrip(block: Block): { tiles: string[]; tileW: number } {
+  const blockW = Math.max(1, block.width)
+
+  if (block.kind === 'hold' && block.frame) {
+    const id = block.frame.id
+    const { bbox, aspect } = frameBBox(id)
+    const { n, tileW, renderW, renderH } = stripLayout(blockW, aspect)
+    const url = renderThumbnail(
+      `f:${id}:${stripEpoch.value}:${aspect.toFixed(3)}`,
+      () => framePreviewPoints(id),
+      bbox,
+      renderW,
+      renderH,
+    )
+    return { tiles: Array.from({ length: n }, () => url), tileW }
+  }
+
+  const fromId = block.fromId!
+  const toId = block.toId!
+  const { bbox, aspect } = pairBBox(fromId, toId)
+  const { n, tileW, renderW, renderH } = stripLayout(blockW, aspect)
+  const render = block.transitionId ? getRender(block.transitionId) : null
+  const tiles: string[] = []
+  for (let i = 0; i < n; i++) {
+    const t = n === 1 ? 0.5 : i / (n - 1)
+    const bucket = Math.round(t * 50)
+    const key = render
+      ? `t:${block.transitionId}:${renderRevision.value}:${bucket}:${aspect.toFixed(3)}`
+      : `g:${fromId}:${toId}:${stripEpoch.value}:${bucket}:${aspect.toFixed(3)}`
+    tiles.push(
+      renderThumbnail(
+        key,
+        () => samplePoints(render, framePreviewPoints(fromId), framePreviewPoints(toId), bucket / 50),
+        bbox,
+        renderW,
+        renderH,
+      ),
+    )
+  }
+  return { tiles, tileW }
+}
+
+/**
+ * 胶片条布局：按自然方块大小铺满整段，张数不设上限。
+ * 自然宽由内容宽高比决定；渲染分辨率 = 自然尺寸 × SS（缩小显示 → 点更小）。
+ */
+function stripLayout(
+  blockW: number,
+  aspect: number,
+): { n: number; tileW: number; renderW: number; renderH: number } {
+  const tileW = Math.max(24, PREVIEW_H * aspect)
+  const n = Math.max(1, Math.ceil(blockW / tileW))
+  return {
+    n,
+    tileW,
+    renderW: Math.max(16, Math.round(PREVIEW_H * aspect)) * SS,
+    renderH: PREVIEW_H * SS,
+  }
+}
+
+/** 所有片段的胶片条（按 block.id 索引，随依赖变化重算） */
+const strips = computed(() => {
+  const map = new Map<string, { tiles: string[]; tileW: number }>()
+  for (const b of blocks.value) map.set(b.id, blockStrip(b))
+  return map
+})
+
+function stripOf(block: Block): { tiles: string[]; tileW: number } {
+  return strips.value.get(block.id) ?? { tiles: [], tileW: PREVIEW_H }
+}
+
 /** 通过点击位置换算时间（相对轨道左边缘） */
 function seekFromEvent(e: { clientX: number }, el: HTMLElement): void {
   const rect = el.getBoundingClientRect()
@@ -263,8 +440,12 @@ function formatTime(t: number): string {
             @dragover.prevent
             @drop="onDrop(block.index)"
           >
-            <img v-if="block.frame?.thumbnail" :src="block.frame.thumbnail" class="thumb" alt="" />
-            <div v-else class="thumb empty">无图</div>
+            <div class="filmstrip" :style="{ '--tw': stripOf(block).tileW + 'px' }">
+              <template v-for="(u, i) in stripOf(block).tiles" :key="i">
+                <img v-if="u" :src="u" class="tile" draggable="false" alt="" />
+                <div v-else class="tile placeholder" />
+              </template>
+            </div>
             <div class="clip-meta">
               <div class="clip-name">{{ block.frame?.name }}</div>
               <div class="clip-sub">{{ block.frame?.duration }}s · {{ block.frame?.pointCount }} 点</div>
@@ -294,9 +475,17 @@ function formatTime(t: number): string {
             :title="block.transitionId ? '点击编辑过渡' : '点击新增过渡'"
             @click="onTransitionClick(block)"
           >
-            <span v-if="block.transitionId" class="trans-label">
-              {{ block.algorithm }} · {{ block.transitionDuration }}s
-            </span>
+            <template v-if="block.transitionId">
+              <div class="filmstrip" :style="{ '--tw': stripOf(block).tileW + 'px' }">
+                <template v-for="(u, i) in stripOf(block).tiles" :key="i">
+                  <img v-if="u" :src="u" class="tile" draggable="false" alt="" />
+                  <div v-else class="tile placeholder" />
+                </template>
+              </div>
+              <span class="trans-label">
+                {{ block.algorithm }} · {{ block.transitionDuration }}s
+              </span>
+            </template>
             <span v-else class="trans-add">+</span>
           </div>
         </template>
@@ -394,22 +583,29 @@ function formatTime(t: number): string {
   border-color: var(--accent);
   box-shadow: 0 0 0 1px var(--accent) inset;
 }
-.thumb {
-  width: 60px;
-  height: 60px;
-  object-fit: cover;
-  border-radius: 4px;
-  flex-shrink: 0;
-  background: #0b0e13;
-}
-.thumb.empty {
+/* 胶片条：铺满片段背景的等宽方块缩略图（剪映风格） */
+.filmstrip {
+  position: absolute;
+  inset: 0;
   display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 11px;
-  color: var(--text-dim);
+  overflow: hidden;
+  border-radius: 5px;
+}
+.filmstrip .tile {
+  width: var(--tw, 66px);
+  height: 100%;
+  object-fit: cover;
+  flex: 0 0 auto;
+}
+.filmstrip .tile.placeholder {
+  background: rgba(255, 255, 255, 0.04);
 }
 .clip-meta {
+  position: relative;
+  z-index: 1;
+  padding: 3px 6px;
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.42);
   min-width: 0;
 }
 .clip-name {
@@ -465,8 +661,12 @@ function formatTime(t: number): string {
   box-shadow: 0 0 0 1px var(--success) inset;
 }
 .trans-label {
+  position: relative;
+  z-index: 1;
   white-space: nowrap;
-  padding: 0 4px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.42);
 }
 .trans-add {
   position: absolute;
