@@ -36,6 +36,17 @@ const emit = defineEmits<{
 
 /** 时间轴缩放：像素/秒（用户缩放的下限） */
 const pxPerSec = ref(60)
+/** 缩放的取值范围（对数映射，保证小/大跨度都好调） */
+const ZOOM_MIN = 2
+const ZOOM_MAX = 4000
+/** 滑块位置（0~100，对数映射到 pxPerSec）：可一直放大到远超"铺满宽度" */
+const zoomPos = computed({
+  get: () => (100 * Math.log(pxPerSec.value / ZOOM_MIN)) / Math.log(ZOOM_MAX / ZOOM_MIN),
+  set: (v: number) => {
+    const t = Math.min(100, Math.max(0, v)) / 100
+    pxPerSec.value = ZOOM_MIN * Math.pow(ZOOM_MAX / ZOOM_MIN, t)
+  },
+})
 /** 拖拽排序时的源下标 */
 const dragFrom = ref<number | null>(null)
 
@@ -66,14 +77,17 @@ const duration = computed(() => {
 })
 
 /**
- * 生效的像素/秒：至少让整条时间线铺满容器宽度，
- * 这样短时间线也能铺满、拖动播放头更自然（缩放到更大时才用用户值）。
+ * 生效的像素/秒：完全由滑块控制（可自由放大/缩小），
+ * 需要"铺满宽度"时用「适配」按钮一键设置。
  */
-const pxPerSecEff = computed(() => {
+const pxPerSecEff = computed(() => pxPerSec.value)
+
+/** 一键让整条时间线铺满容器宽度 */
+function fitZoom(): void {
   const d = duration.value
-  if (d <= 0 || containerWidth.value <= 0) return pxPerSec.value
-  return Math.max(pxPerSec.value, containerWidth.value / d)
-})
+  if (d <= 0 || containerWidth.value <= 0) return
+  pxPerSec.value = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, containerWidth.value / d))
+}
 
 interface Block {
   kind: 'hold' | 'transition'
@@ -88,24 +102,26 @@ interface Block {
   algorithm?: string
 }
 
-/** 顺序展开：帧块 → （其后的过渡块）→ 下一帧块 */
+/** 顺序展开：帧块 → （其后的过渡块）→ 下一帧块。
+ *  宽度严格 = 时长 × 像素/秒，保证播放头/刻度与片段精确对齐（不加最小宽度、不加外边距）。 */
 const blocks = computed<Block[]>(() => {
   const px = pxPerSecEff.value
   const list: Block[] = []
   frames.value.forEach((f, i) => {
-    list.push({ kind: 'hold', id: f.id, width: Math.max(48, f.duration * px), frame: f, index: i })
+    list.push({ kind: 'hold', id: f.id, width: f.duration * px, frame: f, index: i })
     const next = frames.value[i + 1]
     if (!next) return
     const tr = transitions.value.find((t) => t.fromFrameId === f.id && t.toFrameId === next.id)
     list.push({
       kind: 'transition',
       id: tr?.id ?? `gap:${f.id}:${next.id}`,
-      width: tr ? Math.max(28, tr.duration * px) : 28,
+      // 无过渡时占 0 宽（对应时间轴上 0 时长），仅作为一个"新增"的浮层锚点
+      width: tr ? (tr.duration + tr.stagger) * px : 0,
       index: i,
       transitionId: tr?.id,
       fromId: f.id,
       toId: next.id,
-      transitionDuration: tr?.duration,
+      transitionDuration: tr ? tr.duration + tr.stagger : undefined,
       algorithm: tr?.algorithm,
     })
   })
@@ -114,6 +130,24 @@ const blocks = computed<Block[]>(() => {
 
 const trackWidth = computed(() => blocks.value.reduce((sum, b) => sum + b.width, 0))
 const playheadX = computed(() => props.currentTime * pxPerSecEff.value)
+
+/** 刻度步长：保证相邻标签间距不小于 ~46px，取 1/2/5/10/15/30/60… 等"好看"值 */
+const TICK_STEPS = [1, 2, 5, 10, 15, 30, 60, 120, 300, 600]
+const tickStep = computed(() => {
+  const px = pxPerSecEff.value
+  if (px <= 0) return 1
+  const want = 46 / px
+  for (const s of TICK_STEPS) if (s >= want) return s
+  return TICK_STEPS[TICK_STEPS.length - 1]
+})
+/** 当前要显示的秒刻度（按步长间隔采样） */
+const ticks = computed(() => {
+  const step = tickStep.value
+  const max = Math.max(step, Math.ceil(duration.value / step) * step)
+  const arr: number[] = []
+  for (let t = 0; t <= max + 1e-6; t += step) arr.push(t)
+  return arr
+})
 
 /** 通过点击位置换算时间（相对轨道左边缘） */
 function seekFromEvent(e: { clientX: number }, el: HTMLElement): void {
@@ -185,14 +219,15 @@ function formatTime(t: number): string {
       <span class="hint">无人机总数 {{ droneCount }}</span>
       <label class="zoom">
         缩放
-        <input v-model.number="pxPerSec" type="range" min="20" max="240" step="10" />
+        <input v-model.number="zoomPos" type="range" min="0" max="100" step="1" />
+        <button class="fit" title="让整条时间线铺满宽度" @click="fitZoom">适配</button>
       </label>
     </div>
 
-    <!-- 刻度尺：点击/拖拽 seek（拖动播放头） -->
+    <!-- 刻度尺 + 轨道共用同一横向滚动容器，保证播放头 / 刻度 / 片段始终对齐 -->
+    <div class="tl-scroll" ref="rulerEl">
     <div
       class="ruler"
-      ref="rulerEl"
       @pointerdown="onScrubStart($event, $event.currentTarget as HTMLElement)"
       @pointermove="onScrubMove($event, $event.currentTarget as HTMLElement)"
       @pointerup="onScrubEnd($event, $event.currentTarget as HTMLElement)"
@@ -200,12 +235,12 @@ function formatTime(t: number): string {
     >
       <div class="ruler-inner" :style="{ width: trackWidth + 'px' }">
         <span
-          v-for="t in Math.ceil(duration) + 1"
+          v-for="t in ticks"
           :key="t"
           class="tick"
-          :style="{ left: (t - 1) * pxPerSecEff + 'px' }"
+          :style="{ left: t * pxPerSecEff + 'px' }"
         >
-          {{ t - 1 }}s
+          {{ t }}s
         </span>
         <div class="playhead" :style="{ left: playheadX + 'px' }">
           <span class="playhead-knob" />
@@ -213,8 +248,7 @@ function formatTime(t: number): string {
       </div>
     </div>
 
-    <!-- 轨道：帧块 + 过渡块 -->
-    <div class="track-wrap">
+      <!-- 轨道：帧块 + 过渡块 -->
       <div class="track" :style="{ width: trackWidth + 'px' }">
         <template v-for="block in blocks" :key="block.id">
           <!-- 帧片段 -->
@@ -312,8 +346,7 @@ function formatTime(t: number): string {
 .ruler {
   position: relative;
   height: 22px;
-  overflow-x: auto;
-  overflow-y: hidden;
+  overflow: visible;
   border-bottom: 1px solid var(--border);
   cursor: ew-resize;
   user-select: none;
@@ -326,14 +359,15 @@ function formatTime(t: number): string {
 .tick {
   position: absolute;
   top: 4px;
-  transform: translateX(-50%);
   font-size: 10px;
   color: var(--text-dim);
   border-left: 1px solid var(--border);
   padding-left: 2px;
+  white-space: nowrap;
 }
-.track-wrap {
+.tl-scroll {
   overflow-x: auto;
+  overflow-y: hidden;
   padding: 8px 0;
 }
 .track {
@@ -341,7 +375,7 @@ function formatTime(t: number): string {
   display: flex;
   align-items: stretch;
   height: 78px;
-  padding: 0 4px;
+  padding: 0;
 }
 .clip {
   position: relative;
@@ -406,10 +440,10 @@ function formatTime(t: number): string {
   right: 2px;
 }
 .trans {
+  position: relative;
   display: flex;
   align-items: center;
   justify-content: center;
-  margin: 0 2px;
   border-radius: 6px;
   border: 1px dashed var(--success);
   background: rgba(74, 217, 145, 0.08);
@@ -420,9 +454,11 @@ function formatTime(t: number): string {
   overflow: hidden;
 }
 .trans.empty {
-  color: var(--accent);
-  border-color: var(--accent);
-  background: rgba(54, 198, 255, 0.08);
+  overflow: visible;
+  border: none;
+  background: none;
+  margin: 0;
+  padding: 0;
 }
 .trans.active {
   border-style: solid;
@@ -433,7 +469,21 @@ function formatTime(t: number): string {
   padding: 0 4px;
 }
 .trans-add {
-  font-size: 16px;
+  position: absolute;
+  left: 0;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: 18px;
+  height: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  border: 1px dashed var(--accent);
+  background: rgba(54, 198, 255, 0.12);
+  color: var(--accent);
+  font-size: 14px;
+  line-height: 1;
 }
 .empty-track {
   align-self: center;

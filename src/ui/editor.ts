@@ -113,6 +113,7 @@ export interface TransitionView {
   fromFrameId: string
   toFrameId: string
   duration: number
+  stagger: number
   algorithm: string
   path: string
   easing: string
@@ -139,6 +140,7 @@ export const transitions = computed<TransitionView[]>(() => {
     fromFrameId: t.fromFrameId,
     toFrameId: t.toFrameId,
     duration: t.duration,
+    stagger: t.stagger ?? 0,
     algorithm: t.algorithm,
     path: t.path,
     easing: t.easing,
