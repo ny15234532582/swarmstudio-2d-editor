@@ -265,6 +265,13 @@ function onKeyDown(e: KeyboardEvent): void {
   if (isTypingTarget(e.target)) return
   const mod = e.metaKey || e.ctrlKey
 
+  // 空格：播放 / 暂停（再次按下暂停）
+  if (e.key === ' ' || e.key === 'Spacebar') {
+    e.preventDefault()
+    onTogglePlay()
+    return
+  }
+
   if (mod && e.key.toLowerCase() === 'z') {
     e.preventDefault()
     if (e.shiftKey) editor.redo()

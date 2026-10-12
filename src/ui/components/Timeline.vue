@@ -175,7 +175,7 @@ function formatTime(t: number): string {
       <button
         class="play"
         :disabled="!playing && !canPlay"
-        :title="canPlay ? '' : '请先对每个过渡点击「开始计算」生成产物'"
+        :title="canPlay ? '播放 / 暂停（空格）' : '请先对每个过渡点击「开始计算」生成产物'"
         @click="emit('toggle-play')"
       >
         {{ playing ? '⏸ 暂停' : '▶ 播放' }}
