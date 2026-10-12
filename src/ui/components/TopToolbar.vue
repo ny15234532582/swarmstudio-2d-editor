@@ -10,13 +10,9 @@ import {
   addPointAtViewCenter,
   canRedo,
   canUndo,
-  droneCount,
   editor,
-  pointRadius,
   redoLabel,
   selectedCount,
-  setDroneCount,
-  setPointRadius,
   undoLabel,
 } from '../editor'
 import { toast } from '../toast'
@@ -28,18 +24,6 @@ const emit = defineEmits<{
 
 // 取色器当前颜色，默认主题蓝；仅在选择点位后「应用」才有意义
 const color = ref('#4ea1ff')
-
-/** 无人机总数变更（写入项目参数） */
-function onDroneCountChange(e: Event): void {
-  const value = Number((e.target as HTMLInputElement).value)
-  if (Number.isFinite(value) && value > 0) setDroneCount(value)
-}
-
-/** 点半径变更（世界单位/米） */
-function onPointRadiusChange(e: Event): void {
-  const value = Number((e.target as HTMLInputElement).value)
-  if (Number.isFinite(value) && value > 0) setPointRadius(value)
-}
 
 /** 将取色器颜色应用到当前选中点；未选中时给出提示而非静默失败 */
 function applyColor(): void {
@@ -99,30 +83,6 @@ function applyColor(): void {
     <div class="group">
       <button @click="emit('fit')">适配视图</button>
       <button @click="editor.clearSelection()">取消选择</button>
-    </div>
-
-    <div class="spacer" />
-
-    <!-- 区域：无人机总数 / 点半径（画质固定自动，不暴露给用户） -->
-    <div class="group">
-      <label class="label">无人机总数</label>
-      <input
-        class="num"
-        type="number"
-        min="1"
-        step="1"
-        :value="droneCount"
-        @change="onDroneCountChange"
-      />
-      <label class="label">点半径(米)</label>
-      <input
-        class="num"
-        type="number"
-        min="0.05"
-        step="0.1"
-        :value="pointRadius"
-        @change="onPointRadiusChange"
-      />
     </div>
   </header>
 </template>
