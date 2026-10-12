@@ -59,21 +59,29 @@ const zoomPos = computed({
 /** 拖拽排序时的源下标 */
 const dragFrom = ref<number | null>(null)
 
-/** 刻度尺容器（用于自适应铺满宽度） */
+/** 刻度尺容器（用于自适应铺满宽度）；scrollLeft 用于胶片条虚拟化 */
 const rulerEl = ref<HTMLElement>()
 const containerWidth = ref(0)
+const scrollLeft = ref(0)
 let resizeObserver: ResizeObserver | null = null
+
+function onScroll(): void {
+  scrollLeft.value = rulerEl.value?.scrollLeft ?? 0
+}
 
 onMounted(() => {
   const el = rulerEl.value
   if (!el) return
   containerWidth.value = el.clientWidth
+  scrollLeft.value = el.scrollLeft
+  el.addEventListener('scroll', onScroll, { passive: true })
   resizeObserver = new ResizeObserver(() => {
     containerWidth.value = rulerEl.value?.clientWidth ?? 0
   })
   resizeObserver.observe(el)
 })
 onBeforeUnmount(() => {
+  rulerEl.value?.removeEventListener('scroll', onScroll)
   resizeObserver?.disconnect()
   resizeObserver = null
 })
@@ -254,14 +262,24 @@ function samplePoints(
   })
 }
 
-/** 计算一个片段要平铺的胶片条：按自然方块大小铺满整段（张数不设上限） */
-function blockStrip(block: Block): { tiles: string[]; tileW: number } {
+/**
+ * 计算一个片段要平铺的胶片条；**只渲染可视范围内的方块**（虚拟化）。
+ * 张数不设上限（铺满整段），但离屏的方块不生成图片，避免主线程卡死。
+ */
+function blockStrip(
+  block: Block,
+  startX: number,
+  vis0: number,
+  vis1: number,
+): { tiles: string[]; tileW: number; startIndex: number } {
   const blockW = Math.max(1, block.width)
 
   if (block.kind === 'hold' && block.frame) {
     const id = block.frame.id
     const { bbox, aspect } = frameBBox(id)
     const { n, tileW, renderW, renderH } = stripLayout(blockW, aspect)
+    const first = Math.max(0, Math.floor((vis0 - startX) / tileW))
+    const last = Math.min(n, Math.ceil((vis1 - startX) / tileW))
     const url = renderThumbnail(
       `f:${id}:${stripEpoch.value}:${aspect.toFixed(3)}`,
       () => framePreviewPoints(id),
@@ -269,16 +287,18 @@ function blockStrip(block: Block): { tiles: string[]; tileW: number } {
       renderW,
       renderH,
     )
-    return { tiles: Array.from({ length: n }, () => url), tileW }
+    return { tiles: Array.from({ length: Math.max(0, last - first) }, () => url), tileW, startIndex: first }
   }
 
   const fromId = block.fromId!
   const toId = block.toId!
   const { bbox, aspect } = pairBBox(fromId, toId)
   const { n, tileW, renderW, renderH } = stripLayout(blockW, aspect)
+  const first = Math.max(0, Math.floor((vis0 - startX) / tileW))
+  const last = Math.min(n, Math.ceil((vis1 - startX) / tileW))
   const render = block.transitionId ? getRender(block.transitionId) : null
   const tiles: string[] = []
-  for (let i = 0; i < n; i++) {
+  for (let i = first; i < last; i++) {
     const t = n === 1 ? 0.5 : i / (n - 1)
     const bucket = Math.round(t * 50)
     const key = render
@@ -294,17 +314,11 @@ function blockStrip(block: Block): { tiles: string[]; tileW: number } {
       ),
     )
   }
-  return { tiles, tileW }
+  return { tiles, tileW, startIndex: first }
 }
 
-/**
- * 胶片条布局：按自然方块大小铺满整段，张数不设上限。
- * 自然宽由内容宽高比决定；渲染分辨率 = 自然尺寸 × SS（缩小显示 → 点更小）。
- */
-function stripLayout(
-  blockW: number,
-  aspect: number,
-): { n: number; tileW: number; renderW: number; renderH: number } {
+/** 胶片条布局：自然方块宽 + 铺满整段所需的张数（不设上限）；渲染尺寸 = 自然尺寸 × SS */
+function stripLayout(blockW: number, aspect: number): { n: number; tileW: number; renderW: number; renderH: number } {
   const tileW = Math.max(24, PREVIEW_H * aspect)
   const n = Math.max(1, Math.ceil(blockW / tileW))
   return {
@@ -315,15 +329,21 @@ function stripLayout(
   }
 }
 
-/** 所有片段的胶片条（按 block.id 索引，随依赖变化重算） */
+/** 所有片段的胶片条（按 block.id 索引，随依赖变化重算；只含可视方块） */
 const strips = computed(() => {
-  const map = new Map<string, { tiles: string[]; tileW: number }>()
-  for (const b of blocks.value) map.set(b.id, blockStrip(b))
+  const map = new Map<string, { tiles: string[]; tileW: number; startIndex: number }>()
+  const vis0 = scrollLeft.value - containerWidth.value
+  const vis1 = scrollLeft.value + containerWidth.value * 2
+  let x = 0
+  for (const b of blocks.value) {
+    map.set(b.id, blockStrip(b, x, vis0, vis1))
+    x += b.width
+  }
   return map
 })
 
-function stripOf(block: Block): { tiles: string[]; tileW: number } {
-  return strips.value.get(block.id) ?? { tiles: [], tileW: PREVIEW_H }
+function stripOf(block: Block): { tiles: string[]; tileW: number; startIndex: number } {
+  return strips.value.get(block.id) ?? { tiles: [], tileW: PREVIEW_H, startIndex: 0 }
 }
 
 /** 通过点击位置换算时间（相对轨道左边缘） */
@@ -440,7 +460,7 @@ function formatTime(t: number): string {
             @dragover.prevent
             @drop="onDrop(block.index)"
           >
-            <div class="filmstrip" :style="{ '--tw': stripOf(block).tileW + 'px' }">
+            <div class="filmstrip" :style="{ left: stripOf(block).startIndex * stripOf(block).tileW + 'px', '--tw': stripOf(block).tileW + 'px' }">
               <template v-for="(u, i) in stripOf(block).tiles" :key="i">
                 <img v-if="u" :src="u" class="tile" draggable="false" alt="" />
                 <div v-else class="tile placeholder" />
@@ -476,7 +496,7 @@ function formatTime(t: number): string {
             @click="onTransitionClick(block)"
           >
             <template v-if="block.transitionId">
-              <div class="filmstrip" :style="{ '--tw': stripOf(block).tileW + 'px' }">
+              <div class="filmstrip" :style="{ left: stripOf(block).startIndex * stripOf(block).tileW + 'px', '--tw': stripOf(block).tileW + 'px' }">
                 <template v-for="(u, i) in stripOf(block).tiles" :key="i">
                   <img v-if="u" :src="u" class="tile" draggable="false" alt="" />
                   <div v-else class="tile placeholder" />
@@ -583,13 +603,14 @@ function formatTime(t: number): string {
   border-color: var(--accent);
   box-shadow: 0 0 0 1px var(--accent) inset;
 }
-/* 胶片条：铺满片段背景的等宽方块缩略图（剪映风格） */
+/* 胶片条：铺满整段；虚拟化后只放可视方块，用 left 定位起始偏移 */
 .filmstrip {
   position: absolute;
-  inset: 0;
+  top: 0;
+  bottom: 0;
+  left: 0;
   display: flex;
   overflow: hidden;
-  border-radius: 5px;
 }
 .filmstrip .tile {
   width: var(--tw, 66px);
@@ -655,6 +676,8 @@ function formatTime(t: number): string {
   background: none;
   margin: 0;
   padding: 0;
+  /* 空过渡占 0 宽，靠 z-index 让「+」浮在相邻片段之上，保证可见可点 */
+  z-index: 3;
 }
 .trans.active {
   border-style: solid;
@@ -673,17 +696,21 @@ function formatTime(t: number): string {
   left: 0;
   top: 50%;
   transform: translate(-50%, -50%);
-  width: 18px;
-  height: 18px;
+  width: 20px;
+  height: 20px;
   display: flex;
   align-items: center;
   justify-content: center;
   border-radius: 50%;
   border: 1px dashed var(--accent);
-  background: rgba(54, 198, 255, 0.12);
+  background: rgba(54, 198, 255, 0.16);
   color: var(--accent);
-  font-size: 14px;
+  font-size: 15px;
   line-height: 1;
+}
+.trans.empty:hover .trans-add {
+  transform: translate(-50%, -50%) scale(1.15);
+  background: rgba(54, 198, 255, 0.28);
 }
 .empty-track {
   align-self: center;
