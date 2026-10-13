@@ -119,7 +119,9 @@ onMounted(() => {
     score?.resize()
     gauge?.resize()
   })
-  if (histEl.value) ro.observe(histEl.value)
+  for (const el of [histEl.value, curveEl.value, scoreEl.value, gaugeEl.value]) {
+    if (el) ro.observe(el)
+  }
 })
 
 watch(() => props.stats, update)
@@ -145,20 +147,27 @@ onBeforeUnmount(() => {
     </div>
     <div class="chart">
       <div class="cap">加权得分构成</div>
-      <div ref="scoreEl" class="canvas short" />
+      <div ref="scoreEl" class="canvas" />
     </div>
     <div class="chart">
       <div class="cap">峰值 / 上限占比</div>
-      <div ref="gaugeEl" class="canvas short" />
+      <div ref="gaugeEl" class="canvas" />
     </div>
   </div>
 </template>
 
 <style scoped>
 .charts {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+.chart {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px 4px;
+  min-width: 0;
 }
 .cap {
   font-size: 11px;
@@ -167,9 +176,6 @@ onBeforeUnmount(() => {
 }
 .canvas {
   width: 100%;
-  height: 130px;
-}
-.canvas.short {
-  height: 84px;
+  height: 150px;
 }
 </style>

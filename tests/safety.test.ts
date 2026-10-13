@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { buildRender, planAvoidance, sampleRenderSegment } from '../src/core/transition'
-import { SAFETY_LIMITS, minDurationForLimits, safetyCheck } from '../src/core/safety'
+import { SAFETY_LIMITS, minDurationForLimits, shortestDurationForLimits, safetyCheck } from '../src/core/safety'
 import type { Point, Transition } from '../src/core/types'
 
 function pt(id: string, x: number, y: number, f = 'f1'): Point {
@@ -94,5 +94,42 @@ describe('安全检测', () => {
       }
     }
     expect(worst).toBeGreaterThan(1.2)
+  })
+})
+
+describe('shortestDurationForLimits', () => {
+  const zero = {
+    minSeparation: Infinity,
+    hSpeed: 0,
+    upSpeed: 0,
+    downSpeed: 0,
+    hAccel: 0,
+    upAccel: 0,
+    downAccel: 0,
+  }
+
+  it('速度受限：T_min = T·peak/limit（可小于当前时长）', () => {
+    const m = { ...zero, hSpeed: 4.4 }
+    // 90 × 4.4/4.5 = 88
+    expect(shortestDurationForLimits(m, SAFETY_LIMITS, 90)).toBeCloseTo(88, 5)
+  })
+
+  it('加速度受限：T_min = T·√(peak/limit)', () => {
+    const m = { ...zero, hAccel: 18 } // 18 = 4.5 × 4 → √4 = 2
+    expect(shortestDurationForLimits(m, SAFETY_LIMITS, 90)).toBeCloseTo(180, 5)
+  })
+
+  it('结果与当前时长选择无关（峰值按 1/T 缩放）', () => {
+    const p80 = 2.0 // 80s 时的峰值速度
+    const m80 = { ...zero, hSpeed: p80 }
+    const m100 = { ...zero, hSpeed: p80 * (80 / 100) } // 100s 时峰值 = p80 × 80/100
+    const a = shortestDurationForLimits(m80, SAFETY_LIMITS, 80)
+    const b = shortestDurationForLimits(m100, SAFETY_LIMITS, 100)
+    expect(a).toBeCloseTo(b, 5)
+    expect(a).toBeCloseTo((80 * p80) / SAFETY_LIMITS.hSpeed, 5)
+  })
+
+  it('无运动（峰值全 0）→ 返回当前时长', () => {
+    expect(shortestDurationForLimits(zero, SAFETY_LIMITS, 90)).toBe(90)
   })
 })

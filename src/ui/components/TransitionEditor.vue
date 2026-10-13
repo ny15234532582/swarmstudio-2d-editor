@@ -4,16 +4,28 @@
  *
  * 流程：
  *   1) 配参数（草稿，不落库）；
- *   2) 点【预览】→ Worker 计算匹配 → 组装产物（轨道/统计/图表/轨迹）→ **只在内存**；
- *   3) 点【新增】/【保存修改】→ 才把过渡参数 + 产物写入 OPFS（SQLite）。
+ *   2) 点【应用】→ 右下角弹窗：Worker 计算匹配 → 组装产物（只在内存）→ 安全检测逐项打勾
+ *      → 给出「当前设置下符合要求的最短时长」→ 可预览（带进度条拖拽）；此时【保存】才写入 OPFS。
  *
- * 产物本随工程/过渡，可删除；编辑帧或参数不会自动更新已保存产物，需手动再预览+保存。
+ * 产物本随工程/过渡，可删除；编辑帧或参数不会自动更新已保存产物，需重新【应用】+【保存】。
  */
 import { computed, reactive, ref, watch } from 'vue'
-import { droneLimits, editor, getPointsByFrame, setDroneLimits, showTrails } from '../editor'
+import {
+  droneLimits,
+  editor,
+  getPointsByFrame,
+  setDroneLimits,
+  showTrails,
+  showTransitionPreviewAt,
+} from '../editor'
 import { service } from '../projects'
-import { buildRender, renderSignature } from '../../core/transition'
-import { SAFETY_LIMITS, minDurationForLimits, type SafetyResult } from '../../core/safety'
+import { buildRender, renderSignature, type RenderAssignment } from '../../core/transition'
+import {
+  SAFETY_LIMITS,
+  minDurationForLimits,
+  shortestDurationForLimits,
+  type SafetyResult,
+} from '../../core/safety'
 import {
   getRender,
   renderRevision,
@@ -67,6 +79,10 @@ const mode = computed(() => props.state?.mode ?? 'new')
 
 const simple = ref(true)
 const showAdvanced = ref(false)
+const statsOpen = ref(false)
+function closeStats(): void {
+  statsOpen.value = false
+}
 const limitSpeed = ref(0)
 const limitAccel = ref(0)
 const rendering = ref(false)
@@ -76,6 +92,20 @@ const safety = ref<SafetyResult | null>(null)
 const checking = ref(false)
 let lastElapsed = 0
 let syncing = false
+
+// ---------------------------------------------------- 确认弹窗（右下角）状态
+type ConfirmPhase = 'computing' | 'mindur' | 'checking' | 'done' | 'failed'
+const confirmOpen = ref(false)
+const phase = ref<ConfirmPhase>('computing')
+const checkedCount = ref(0)
+const minDuration = ref<number | null>(null)
+const minDurationApprox = ref(false)
+const previewT = ref(0)
+const previewPlaying = ref(false)
+let previewRaf = 0
+let previewLast = 0
+/** 最近一次预览算出的匹配（与时长无关，可用于验证最短时长时复用，免重跑求解器） */
+let lastAssignment: RenderAssignment | null = null
 
 // 预设
 const W = (o: Record<string, number>): Record<string, number> => ({
@@ -109,8 +139,6 @@ const activePreset = computed(() => {
     if ((p.path ?? 'linear') !== form.path) return false
     if ((p.velocityProfile ?? 'ease') !== form.velocityProfile) return false
     if ((p.easing ?? 'easeInOut') !== form.easing) return false
-    if ((p.duration ?? form.duration) !== form.duration) return false
-    if ((p.stagger ?? 0) !== form.stagger) return false
     for (const [k, v] of Object.entries(p.params)) {
       if (Math.abs((form.params[k] ?? 0) - v) > 1e-6) return false
     }
@@ -118,6 +146,9 @@ const activePreset = computed(() => {
   })
   return hit?.key ?? null
 })
+
+/** 可应用：有起止帧即可（新建时会自动预选一个默认风格） */
+const canApply = computed(() => !!form.fromFrameId && !!form.toFrameId)
 
 /** 打开时按模式初始化表单 */
 function setupForm(): void {
@@ -151,6 +182,13 @@ function setupForm(): void {
     persisted.value = true
     selectedRenderId.value = form.id
   }
+  // 打开时：若无匹配风格则预选默认风格；并固定以简单模式打开（保证能看到风格）
+  if (activePreset.value === null) applyPreset(PRESETS[0])
+  simple.value = true
+  // 每次打开重置确认弹窗与预览
+  confirmOpen.value = false
+  stopPreview()
+  phase.value = 'computing'
   syncing = false
 }
 watch(() => props.state, setupForm, { immediate: true })
@@ -178,8 +216,13 @@ const avoidInfo = computed(() => {
   return { colors: a.colors, maxDepth: maxL * a.spacing }
 })
 
-const effMaxSpeed = computed(() => form.params.maxSpeedOverride || limitSpeed.value)
-const effMaxAccel = computed(() => form.params.maxAccelOverride || limitAccel.value)
+// 上限：优先过渡级覆盖，其次项目级设置，最后回退到固定安全限值（保证图表/占比有分母）
+const effMaxSpeed = computed(
+  () => form.params.maxSpeedOverride || limitSpeed.value || SAFETY_LIMITS.hSpeed,
+)
+const effMaxAccel = computed(
+  () => form.params.maxAccelOverride || limitAccel.value || SAFETY_LIMITS.hAccel,
+)
 const speedOver = computed(() => effMaxSpeed.value > 0 && !!stats.value && stats.value.peakSpeed > effMaxSpeed.value)
 const accelOver = computed(() => effMaxAccel.value > 0 && !!stats.value && stats.value.peakAccel > effMaxAccel.value)
 
@@ -217,6 +260,7 @@ async function doPreview(): Promise<boolean> {
       transition.params.avoid ? SAFETY_LIMITS.minSeparation : 0,
     )
     lastElapsed = assignment.elapsedMs
+    lastAssignment = assignment
     const built = buildRender(a, b, transition, assignment)
     setRender(form.id, built)
     selectedRenderId.value = form.id
@@ -244,7 +288,7 @@ async function runSafety(): Promise<void> {
   }
 }
 
-watch(render, () => void runSafety(), { immediate: true })
+// 注：安全检测改为在「确认修改」弹窗流程里执行（见 startConfirm），不再自动跑。
 
 /** 一键安全适配：迭代调「时长（速度/加速度）+ 斥力·错峰（间距）」直到通过或放弃 */
 async function autoFitSafety(): Promise<void> {
@@ -304,14 +348,273 @@ async function onCommit(): Promise<void> {
   dirty.value = false
 }
 
+// ---------------------------------------------------- 确认修改：右下角弹窗流程
+
+const METRIC_ORDER = ['minSeparation', 'hSpeed', 'upSpeed', 'downSpeed', 'hAccel', 'upAccel', 'downAccel'] as const
+const METRIC_LABELS: Record<string, string> = {
+  minSeparation: '最小间距',
+  hSpeed: '水平速度',
+  upSpeed: '上升速度',
+  downSpeed: '下降速度',
+  hAccel: '水平加速度',
+  upAccel: '上升加速度',
+  downAccel: '下降加速度',
+}
+const METRIC_UNITS: Record<string, string> = {
+  minSeparation: 'm',
+  hSpeed: 'm/s',
+  upSpeed: 'm/s',
+  downSpeed: 'm/s',
+  hAccel: 'm/s²',
+  upAccel: 'm/s²',
+  downAccel: 'm/s²',
+}
+
+interface CheckItem {
+  key: string
+  label: string
+  unit: string
+  value: number
+  limit: number
+  pass: boolean
+}
+
+const safetyItems = computed<CheckItem[]>(() => {
+  const s = safety.value
+  if (!s) return []
+  return METRIC_ORDER.map((k) => {
+    const value = s.metrics[k]
+    const limit = SAFETY_LIMITS[k]
+    const pass = k === 'minSeparation' ? value >= limit - 1e-9 : value <= limit + 1e-9
+    return { key: k, label: METRIC_LABELS[k], unit: METRIC_UNITS[k], value, limit, pass }
+  })
+})
+
+const previewDuration = computed(() => {
+  const r = render.value
+  return r ? Math.max(0.1, r.duration + r.stagger) : 0
+})
+const previewTimeLabel = computed(() => {
+  const dur = previewDuration.value
+  return `${(previewT.value * dur).toFixed(1)}s / ${dur.toFixed(1)}s`
+})
+/** 间距不达标（缩时长无解，需避让） */
+const separationFailed = computed(
+  () => !!safety.value && safety.value.failures.includes('minSeparation'),
+)
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+/** 估算最短时长（由当前峰值反推；用于起点与兜底） */
+function computeMinDuration(): void {
+  const s = safety.value
+  if (!s) {
+    minDuration.value = null
+    return
+  }
+  const est = shortestDurationForLimits(s.metrics, SAFETY_LIMITS, form.duration)
+  minDuration.value = Math.max(0.1, Math.round(est * 10) / 10)
+}
+
+/**
+ * 实测确认最短时长：复用已算好的匹配（与时长无关），在候选时长上真实跑一次安全检测；
+ * 不达标则用实测峰值重新反推并小幅上调。成功返回「经确认」的值，否则退回估算并标记「约」。
+ */
+async function confirmMinDuration(): Promise<void> {
+  const s = safety.value
+  const assignment = lastAssignment
+  minDurationApprox.value = false
+  if (!s || !assignment) {
+    computeMinDuration()
+    minDurationApprox.value = true
+    return
+  }
+  const byFrame = getPointsByFrame()
+  const a = byFrame.get(form.fromFrameId) ?? []
+  const b = byFrame.get(form.toFrameId) ?? []
+  const base = snapshot()
+  let target =
+    Math.max(0.1, Math.round(shortestDurationForLimits(s.metrics, SAFETY_LIMITS, form.duration) * 10) / 10)
+  let verified: number | null = null
+  for (let i = 0; i < 4; i++) {
+    const render = buildRender(a, b, { ...base, duration: target }, assignment)
+    const res = await getRenderClient().safety(render, SAFETY_LIMITS, 30)
+    if (!res.failures.some((f) => f !== 'minSeparation')) {
+      verified = target
+      break
+    }
+    const re = shortestDurationForLimits(res.metrics, SAFETY_LIMITS, target)
+    target = Math.max(
+      Math.round(re * 10) / 10,
+      Math.round(target * 1.02 * 10) / 10,
+      Math.round((target + 0.1) * 10) / 10,
+    )
+  }
+  if (verified != null) {
+    minDuration.value = verified
+    minDurationApprox.value = false
+  } else {
+    computeMinDuration()
+    minDurationApprox.value = true
+  }
+}
+
+/** 逐个揭示安全检测项：检测完一项打一个勾（或叉） */
+async function runCheckReveal(): Promise<void> {
+  phase.value = 'checking'
+  checkedCount.value = 0
+  const items = safetyItems.value
+  for (let i = 0; i < items.length; i++) {
+    await delay(110)
+    checkedCount.value = i + 1
+  }
+  phase.value = safety.value?.pass ? 'done' : 'failed'
+  if (phase.value === 'done') {
+    previewT.value = 0
+    showTransitionPreviewAt(form.id, 0)
+  }
+}
+
+/** 点【应用】：右下角弹窗 → 计算 → 安全检测逐项打勾 → 确认最短时长 → 预览 */
+async function startConfirm(): Promise<void> {
+  if (!form.fromFrameId || !form.toFrameId) return
+  confirmOpen.value = true
+  stopPreview()
+  previewT.value = 0
+  checkedCount.value = 0
+  minDuration.value = null
+  minDurationApprox.value = false
+  safety.value = null
+  phase.value = 'computing'
+  const ok = await doPreview()
+  if (!ok) {
+    phase.value = 'failed'
+    return
+  }
+  await runSafety()
+  phase.value = 'mindur'
+  await confirmMinDuration()
+  await runCheckReveal()
+}
+
+/** 一键应用最短时长：设为该值并重算 + 验证（采样帧率变化有小误差，做有限次微调） */
+async function applyMinDuration(): Promise<void> {
+  if (minDuration.value == null) return
+  stopPreview()
+  phase.value = 'computing'
+  let target = minDuration.value
+  let applied = false
+  for (let i = 0; i < 6; i++) {
+    form.duration = target
+    const ok = await doPreview()
+    if (!ok) {
+      phase.value = 'failed'
+      return
+    }
+    await runSafety()
+    const s = safety.value
+    if (!s) {
+      phase.value = 'failed'
+      return
+    }
+    // 除间距外的项（速度/加速度）全部达标即为最短
+    if (!s.failures.some((f) => f !== 'minSeparation')) {
+      minDuration.value = Math.round(target * 10) / 10
+      minDurationApprox.value = false
+      applied = true
+      break
+    }
+    // 微调：小幅加时长重试
+    target = Math.round((target * 1.01 + 0.1) * 10) / 10
+  }
+  if (!applied) computeMinDuration()
+  await runCheckReveal()
+}
+
+/** 弹窗内【安全适配】 */
+async function onAutoFit(): Promise<void> {
+  await autoFitSafety()
+  await runCheckReveal()
+}
+
+function togglePreview(): void {
+  if (previewPlaying.value) {
+    stopPreview()
+    return
+  }
+  if (previewDuration.value <= 0) return
+  if (previewT.value >= 1) previewT.value = 0
+  previewPlaying.value = true
+  previewLast = performance.now()
+  const step = (ts: number) => {
+    if (!previewPlaying.value) return
+    const dt = (ts - previewLast) / 1000
+    previewLast = ts
+    previewT.value = Math.min(1, previewT.value + dt / previewDuration.value)
+    showTransitionPreviewAt(form.id, previewT.value)
+    if (previewT.value < 1) previewRaf = requestAnimationFrame(step)
+    else previewPlaying.value = false
+  }
+  previewRaf = requestAnimationFrame(step)
+}
+
+function stopPreview(): void {
+  previewPlaying.value = false
+  if (previewRaf) cancelAnimationFrame(previewRaf)
+  previewRaf = 0
+}
+
+/** 拖拽进度条：暂停并显示该进度 */
+function onScrub(): void {
+  stopPreview()
+  showTransitionPreviewAt(form.id, previewT.value)
+}
+
+function onCancel(): void {
+  stopPreview()
+  showTransitionPreviewAt(form.id, -1)
+  confirmOpen.value = false
+}
+
+/** 弹窗内【保存】= 现在的「保存修改」 */
+async function onSave(): Promise<void> {
+  if (phase.value !== 'done') return
+  await onCommit()
+  if (safety.value?.pass) {
+    stopPreview()
+    showTransitionPreviewAt(form.id, -1)
+    confirmOpen.value = false
+  }
+}
+
+/** 用户偏好类参数：套用风格预设时保留、不被重置 */
+const PRESERVE_KEYS = [
+  'speedMode',
+  'unusedMode',
+  'parkGap',
+  'parkSpacing',
+  'parkDim',
+  'avoid',
+  'minSeparation',
+  'separationStrength',
+  'separationIterations',
+  'staggerOrder',
+  'maxSpeedOverride',
+  'maxAccelOverride',
+]
+
 function applyPreset(p: Preset): void {
   if (p.algorithm) form.algorithm = p.algorithm
   if (p.path) form.path = p.path
   if (p.velocityProfile) form.velocityProfile = p.velocityProfile
   if (p.easing) form.easing = p.easing
-  if (typeof p.duration === 'number') form.duration = p.duration
-  if (typeof p.stagger === 'number') form.stagger = p.stagger
-  form.params = { ...DEFAULT_PARAMS, ...p.params }
+  // 只重置“风格类”参数；保留用户偏好（到达方式/未使用/避让/上限等）
+  const kept: Record<string, number> = {}
+  for (const k of PRESERVE_KEYS) kept[k] = Number(form.params[k]) || 0
+  form.params = { ...DEFAULT_PARAMS, ...p.params, ...kept }
+  // 不改 form.duration / form.stagger：时长与错落完全由【节奏】控制
 }
 
 function applyLimits(): void {
@@ -319,14 +622,11 @@ function applyLimits(): void {
 }
 
 function close(): void {
-  // 只关闭面板；保留内存中的预览产物，使飞行轨迹在关闭后仍然显示
+  // 关闭面板：同时收掉确认弹窗、清掉预览；保留内存产物（飞行轨迹仍显示）
+  stopPreview()
+  showTransitionPreviewAt(form.id, -1)
+  confirmOpen.value = false
   emit('close')
-}
-
-/** 点【预览】= 计算产物 + 立即播放 */
-async function onPreview(): Promise<void> {
-  const ok = await doPreview()
-  if (ok) emit('preview', form.id)
 }
 </script>
 
@@ -335,7 +635,10 @@ async function onPreview(): Promise<void> {
     <template v-if="open">
       <header class="head">
         <h3>{{ mode === 'new' ? '新增过渡' : '修改过渡' }}</h3>
-        <button class="ghost" @click="close">✕</button>
+        <div class="head-actions">
+          <button class="link" :disabled="!stats" :title="stats ? '查看统计' : '生成产物后可查看统计'" @click="statsOpen = true">统计</button>
+          <button class="ghost" @click="close">✕</button>
+        </div>
       </header>
 
       <div class="scroll">
@@ -367,12 +670,12 @@ async function onPreview(): Promise<void> {
           <div class="section">
             <div class="title">节奏</div>
             <label class="field">
-              <span>转场时长 {{ form.duration }}s</span>
-              <input v-model.number="form.duration" type="range" min="0.5" max="8" step="0.5" />
+              <span>转场时长（秒）</span>
+              <input v-model.number="form.duration" type="number" min="0.1" step="0.1" />
             </label>
             <label class="field">
-              <span>出发错落 {{ form.stagger }}s</span>
-              <input v-model.number="form.stagger" type="range" min="0" max="3" step="0.1" />
+              <span>出发错落（秒）</span>
+              <input v-model.number="form.stagger" type="number" min="0" step="0.1" />
             </label>
             <label class="field">
               <span>到达方式</span>
@@ -548,8 +851,8 @@ async function onPreview(): Promise<void> {
           <div class="section">
             <div class="title">④ 相位（谁先出发）</div>
             <label class="field">
-              <span>错峰总时长 {{ form.stagger }}s</span>
-              <input v-model.number="form.stagger" type="range" min="0" max="5" step="0.1" />
+              <span>错峰总时长（秒）</span>
+              <input v-model.number="form.stagger" type="number" min="0" step="0.1" />
             </label>
             <label v-if="form.stagger > 0" class="field">
               <span>错峰顺序</span>
@@ -625,76 +928,151 @@ async function onPreview(): Promise<void> {
             </div>
           </div>
         </template>
-
-        <!-- 统计（仅生成产物后显示） -->
-        <div class="section">
-          <div class="title">统计</div>
-          <template v-if="stats">
-            <div class="stats">
-              <div>点对 <b>{{ stats.pairCount }}</b>　未用（退出/进入）<b>{{ stats.exitingCount }}/{{ stats.enteringCount }}</b></div>
-              <div>段时长 <b>{{ stats.duration.toFixed(1) }}s</b></div>
-              <div>距离 最小/中位/最大：<b>{{ stats.minDistance.toFixed(1) }}</b> / {{ stats.medianDistance.toFixed(1) }} / <b>{{ stats.maxDistance.toFixed(1) }}</b></div>
-              <div>距离 均值±标准差（CV）：{{ stats.meanDistance.toFixed(1) }} ± {{ stats.stdDistance.toFixed(1) }}（{{ (stats.cv * 100).toFixed(0) }}%）</div>
-              <div>总路程：<b>{{ stats.totalDistance.toFixed(0) }}</b></div>
-              <div>总得分 / 最大得分：<b>{{ stats.totalScore.toFixed(1) }}</b> / {{ stats.maxScore.toFixed(2) }}</div>
-              <div :class="{ over: speedOver }">峰值速度：<b>{{ stats.peakSpeed.toFixed(1) }}</b> / {{ effMaxSpeed || '∞' }}（均 {{ stats.avgSpeed.toFixed(1) }}）</div>
-              <div :class="{ over: accelOver }">峰值加速度：<b>{{ stats.peakAccel.toFixed(1) }}</b> / {{ effMaxAccel || '∞' }}（均 {{ stats.avgAccel.toFixed(1) }}）</div>
-              <div>峰值 jerk：{{ stats.peakJerk.toFixed(1) }}</div>
-            </div>
-            <StatCharts :stats="stats" :max-speed="effMaxSpeed" :max-accel="effMaxAccel" />
-          </template>
-        </div>
-
-        <!-- 安全检测（硬约束：不通过不能保存） -->
-        <div class="section">
-          <div class="title">安全检测</div>
-          <div v-if="!render" class="hint">生成产物后自动检测</div>
-          <div v-else-if="checking" class="hint">检测中…</div>
-          <template v-else-if="safety">
-            <div class="badge" :class="safety.pass ? 'ok' : 'bad'">
-              {{ safety.pass ? '通过' : '不通过（不能保存）' }}
-            </div>
-            <div class="stats">
-              <div :class="{ over: safety.metrics.minSeparation < SAFETY_LIMITS.minSeparation }">
-                最小间距：<b>{{ safety.metrics.minSeparation.toFixed(2) }}</b> / ≥ {{ SAFETY_LIMITS.minSeparation }}
-              </div>
-              <div :class="{ over: safety.metrics.hSpeed > SAFETY_LIMITS.hSpeed }">
-                水平速度：<b>{{ safety.metrics.hSpeed.toFixed(2) }}</b> / ≤ {{ SAFETY_LIMITS.hSpeed }}
-              </div>
-              <div :class="{ over: safety.metrics.upSpeed > SAFETY_LIMITS.upSpeed }">
-                上升速度：<b>{{ safety.metrics.upSpeed.toFixed(2) }}</b> / ≤ {{ SAFETY_LIMITS.upSpeed }}
-              </div>
-              <div :class="{ over: safety.metrics.downSpeed > SAFETY_LIMITS.downSpeed }">
-                下降速度：<b>{{ safety.metrics.downSpeed.toFixed(2) }}</b> / ≤ {{ SAFETY_LIMITS.downSpeed }}
-              </div>
-              <div :class="{ over: safety.metrics.hAccel > SAFETY_LIMITS.hAccel }">
-                水平加速度：<b>{{ safety.metrics.hAccel.toFixed(2) }}</b> / ≤ {{ SAFETY_LIMITS.hAccel }}
-              </div>
-              <div :class="{ over: safety.metrics.upAccel > SAFETY_LIMITS.upAccel }">
-                上升加速度：<b>{{ safety.metrics.upAccel.toFixed(2) }}</b> / ≤ {{ SAFETY_LIMITS.upAccel }}
-              </div>
-              <div :class="{ over: safety.metrics.downAccel > SAFETY_LIMITS.downAccel }">
-                下降加速度：<b>{{ safety.metrics.downAccel.toFixed(2) }}</b> / ≤ {{ SAFETY_LIMITS.downAccel }}
-              </div>
-              <div v-if="avoidInfo">
-                深度分层避让：<b>{{ avoidInfo.colors }}</b> 层（最大 ±{{ avoidInfo.maxDepth.toFixed(1) }}m）
-              </div>
-            </div>
-            <button v-if="!safety.pass" class="mini" :disabled="rendering || checking" @click="autoFitSafety">
-              安全适配
-            </button>
-          </template>
-        </div>
       </div>
 
       <footer class="foot">
-        <button :disabled="rendering" @click="onPreview">{{ rendering ? '计算中…' : '预览' }}</button>
-        <button class="primary" :disabled="rendering || (!!render && !!safety && !safety.pass)" @click="onCommit">
-          {{ mode === 'new' ? '新增' : '保存修改' }}
-        </button>
+        <button class="primary" :disabled="rendering || !canApply" @click="startConfirm">应用</button>
       </footer>
     </template>
   </aside>
+
+  <div v-if="open && statsOpen" class="stats-overlay" @click.self="closeStats">
+    <div class="stats-dialog">
+      <header class="stats-head">
+        <h3>过渡统计</h3>
+        <button class="ghost" @click.stop="closeStats">✕</button>
+      </header>
+      <div class="stats-body">
+        <template v-if="stats">
+          <div class="stat-grid">
+            <div class="card">
+              <div class="k">点对</div>
+              <div class="v">{{ stats.pairCount }}</div>
+            </div>
+            <div class="card">
+              <div class="k">未用（退出 / 进入）</div>
+              <div class="v">{{ stats.exitingCount }} / {{ stats.enteringCount }}</div>
+            </div>
+            <div class="card">
+              <div class="k">段时长</div>
+              <div class="v">{{ stats.duration.toFixed(1) }}<i>s</i></div>
+            </div>
+            <div class="card">
+              <div class="k">总路程</div>
+              <div class="v">{{ stats.totalDistance.toFixed(0) }}<i>m</i></div>
+            </div>
+            <div class="card wide">
+              <div class="k">距离 最小 / 中位 / 最大</div>
+              <div class="v">
+                {{ stats.minDistance.toFixed(1) }} · {{ stats.medianDistance.toFixed(1) }} ·
+                {{ stats.maxDistance.toFixed(1) }}<i>m</i>
+              </div>
+            </div>
+            <div class="card wide">
+              <div class="k">距离 均值 ± 标准差（CV）</div>
+              <div class="v">
+                {{ stats.meanDistance.toFixed(1) }} ± {{ stats.stdDistance.toFixed(1) }}
+                <i>{{ (stats.cv * 100).toFixed(0) }}%</i>
+              </div>
+            </div>
+            <div class="card" :class="{ over: speedOver }">
+              <div class="k">峰值速度 / 上限</div>
+              <div class="v">
+                {{ stats.peakSpeed.toFixed(1) }} / {{ effMaxSpeed || '∞' }}<i>m/s</i>
+              </div>
+            </div>
+            <div class="card" :class="{ over: accelOver }">
+              <div class="k">峰值加速度 / 上限</div>
+              <div class="v">
+                {{ stats.peakAccel.toFixed(1) }} / {{ effMaxAccel || '∞' }}<i>m/s²</i>
+              </div>
+            </div>
+            <div class="card">
+              <div class="k">总得分 / 最大得分</div>
+              <div class="v">{{ stats.totalScore.toFixed(1) }} / {{ stats.maxScore.toFixed(2) }}</div>
+            </div>
+            <div class="card">
+              <div class="k">峰值 jerk</div>
+              <div class="v">{{ stats.peakJerk.toFixed(1) }}</div>
+            </div>
+          </div>
+          <StatCharts :stats="stats" :max-speed="effMaxSpeed" :max-accel="effMaxAccel" />
+        </template>
+        <div v-else class="hint">生成产物后显示统计</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 确认修改：右下角弹窗（不遮挡画布） -->
+  <div v-if="open && confirmOpen" class="confirm-panel">
+    <header class="cp-head">
+      <h3>{{ mode === 'new' ? '新增过渡' : '修改过渡' }}</h3>
+      <button class="ghost" @click="onCancel">✕</button>
+    </header>
+    <div class="cp-body">
+      <div v-if="phase === 'computing' || phase === 'mindur'" class="cp-loading">
+        <span class="spinner" />
+        <span>{{ phase === 'mindur' ? '正在确认最短时长…' : '正在计算匹配与生成产物…' }}</span>
+      </div>
+
+      <template v-else>
+        <ul class="cp-checks">
+          <li
+            v-for="(it, i) in safetyItems"
+            :key="it.key"
+            :class="{
+              pending: i >= checkedCount,
+              ok: i < checkedCount && it.pass,
+              bad: i < checkedCount && !it.pass,
+            }"
+          >
+            <span class="mark">{{ i < checkedCount ? (it.pass ? '✓' : '✗') : '' }}</span>
+            <span class="lab">{{ it.label }}</span>
+            <span v-if="i < checkedCount" class="val">
+              {{ it.value.toFixed(2) }} / {{ it.limit }}{{ it.unit }}
+            </span>
+          </li>
+        </ul>
+
+        <div v-if="minDuration != null" class="cp-mindur">
+          <template v-if="separationFailed">
+            当前设置下，符合要求的最短时长为 {{ minDurationApprox ? '约 ' : '' }}<b>{{ minDuration }}</b> 秒（间距未达标，缩短时长无法解决，需开启避让）。
+          </template>
+          <template v-else>
+            当前设置下，符合要求的最短时长为 {{ minDurationApprox ? '约 ' : '' }}<b>{{ minDuration }}</b> 秒。是否
+            <button class="cp-link" @click="applyMinDuration">应用</button>？
+          </template>
+        </div>
+
+        <div v-if="avoidInfo && phase === 'done'" class="cp-note">
+          深度分层避让：{{ avoidInfo.colors }} 层（最大 ±{{ avoidInfo.maxDepth.toFixed(1) }}m）
+        </div>
+
+        <div v-if="phase === 'failed'" class="cp-fail">
+          <span>安全检测未通过，无法保存</span>
+          <button class="mini" @click="onAutoFit">安全适配</button>
+        </div>
+
+        <div v-if="phase === 'done'" class="cp-preview">
+          <button class="mini" @click="togglePreview">{{ previewPlaying ? '⏸ 暂停' : '▶ 预览' }}</button>
+          <input
+            class="cp-range"
+            type="range"
+            min="0"
+            max="1"
+            step="0.002"
+            v-model.number="previewT"
+            @input="onScrub"
+          />
+          <span class="cp-time">{{ previewTimeLabel }}</span>
+        </div>
+      </template>
+    </div>
+    <footer class="cp-foot">
+      <button @click="onCancel">取消</button>
+      <button class="primary" :disabled="phase !== 'done'" @click="onSave">保存</button>
+    </footer>
+  </div>
 </template>
 
 <style scoped>
@@ -725,6 +1103,11 @@ async function onPreview(): Promise<void> {
 .ghost {
   background: transparent;
   border: none;
+}
+.head-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 .modebar {
   display: flex;
@@ -814,6 +1197,10 @@ async function onPreview(): Promise<void> {
   padding: 0;
   font-size: 12px;
 }
+.link:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
 .hint {
   font-size: 12px;
   color: var(--text-dim);
@@ -847,11 +1234,243 @@ async function onPreview(): Promise<void> {
 .stats .over b {
   color: var(--danger);
 }
+/* 统计弹窗：指标卡片网格 */
+.stat-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 16px;
+}
+.stat-grid .card {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  min-width: 0;
+}
+.stat-grid .card.wide {
+  grid-column: span 2;
+}
+.stat-grid .card .k {
+  font-size: 11px;
+  color: var(--text-dim);
+  margin-bottom: 6px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.stat-grid .card .v {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
+}
+.stat-grid .card .v i {
+  font-style: normal;
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--text-dim);
+}
+.stat-grid .card.over {
+  border-color: var(--danger);
+}
+.stat-grid .card.over .v {
+  color: var(--danger);
+}
+/* 统计弹窗（自带遮罩，独立于通用 Modal） */
+.stats-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 300;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.stats-dialog {
+  width: 900px;
+  max-width: 92vw;
+  max-height: 90vh;
+  overflow: auto;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+  display: flex;
+  flex-direction: column;
+}
+.stats-head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+}
+.stats-head h3 {
+  margin: 0;
+  font-size: 15px;
+}
+.stats-body {
+  padding: 16px;
+}
 .foot {
   display: flex;
   align-items: center;
   gap: 6px;
   padding: 12px 14px;
+  border-top: 1px solid var(--border);
+}
+/* 确认修改：右下角弹窗 */
+.confirm-panel {
+  position: fixed;
+  right: 12px;
+  bottom: 12px;
+  width: 340px;
+  max-height: calc(100vh - 24px);
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
+  z-index: 260;
+  overflow: hidden;
+}
+.cp-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+}
+.cp-head h3 {
+  margin: 0;
+  font-size: 13px;
+}
+.cp-body {
+  padding: 12px;
+  overflow: auto;
+}
+.cp-loading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: cp-spin 0.8s linear infinite;
+}
+@keyframes cp-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+.cp-checks {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.cp-checks li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.cp-checks li .mark {
+  width: 14px;
+  text-align: center;
+  font-weight: 700;
+}
+.cp-checks li .lab {
+  flex: 0 0 68px;
+}
+.cp-checks li .val {
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+}
+.cp-checks li.ok .mark {
+  color: var(--success);
+}
+.cp-checks li.ok .val {
+  color: var(--text);
+}
+.cp-checks li.bad .mark,
+.cp-checks li.bad .val {
+  color: var(--danger);
+}
+.cp-note {
+  margin-top: 8px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.cp-mindur {
+  margin-top: 10px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: rgba(54, 198, 255, 0.08);
+  border: 1px solid rgba(54, 198, 255, 0.25);
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-dim);
+}
+.cp-mindur b {
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+}
+.cp-link {
+  background: transparent;
+  border: none;
+  padding: 0;
+  color: var(--accent);
+  font: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+}
+.cp-fail {
+  margin-top: 10px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--danger);
+}
+.cp-preview {
+  margin-top: 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.cp-range {
+  flex: 1;
+  min-width: 0;
+}
+.cp-time {
+  font-size: 11px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+.cp-foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 10px 12px;
   border-top: 1px solid var(--border);
 }
 </style>

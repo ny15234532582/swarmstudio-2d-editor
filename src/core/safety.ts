@@ -186,3 +186,29 @@ export function minDurationForLimits(m: SafetyLimits, limits: SafetyLimits, dura
   need(m.downAccel, limits.downAccel, true)
   return duration * factor
 }
+
+/**
+ * 由峰值反推「满足速度/加速度限值的**最短**时长」。
+ * 与 minDurationForLimits 的区别：不把系数兜底为 1、也不按当前时长兜底，
+ * 因此结果**可以小于当前时长**（用于回答"最短能多短"，而非"不够时加到多少"）。
+ * 速度 ∝ 1/T、加速度 ∝ 1/T²，逐轴取满足限值所需的 T 的最大值。
+ */
+export function shortestDurationForLimits(
+  m: SafetyLimits,
+  limits: SafetyLimits,
+  duration: number,
+): number {
+  let t = 0
+  const need = (peak: number, limit: number, squared: boolean) => {
+    if (limit <= 0 || peak <= 0) return
+    const f = squared ? Math.sqrt(peak / limit) : peak / limit
+    t = Math.max(t, duration * f)
+  }
+  need(m.hSpeed, limits.hSpeed, false)
+  need(m.upSpeed, limits.upSpeed, false)
+  need(m.downSpeed, limits.downSpeed, false)
+  need(m.hAccel, limits.hAccel, true)
+  need(m.upAccel, limits.upAccel, true)
+  need(m.downAccel, limits.downAccel, true)
+  return t > 0 ? t : duration
+}

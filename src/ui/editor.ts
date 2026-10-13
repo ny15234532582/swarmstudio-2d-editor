@@ -235,3 +235,16 @@ export function updateRenderInfo(info: RenderInfo): void {
   renderInfo.value = info
   renderQuality.value = info.quality
 }
+
+// --------------------------------------------------------------- 过渡预览（可拖拽进度）
+
+let transitionPreview: ((transitionId: string, t: number) => void) | null = null
+
+/** 由 App 注入：在画布上显示某过渡在进度 t（0~1，t<0 表示清除）的预览 */
+export function setTransitionPreviewController(fn: (transitionId: string, t: number) => void): void {
+  transitionPreview = fn
+}
+
+export function showTransitionPreviewAt(transitionId: string, t: number): void {
+  transitionPreview?.(transitionId, t)
+}

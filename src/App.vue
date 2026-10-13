@@ -13,6 +13,7 @@ import {
   pointRadius,
   setPointRadiusController,
   setQualityController,
+  setTransitionPreviewController,
   setViewportCenterProvider,
   showTrails,
   transitions,
@@ -99,6 +100,21 @@ onMounted(async () => {
   setQualityController(renderer)
   setPointRadiusController((r) => renderer!.setPointRadius(r))
   renderer.setPointRadius(pointRadius.value)
+  // 供过渡弹窗在画布上预览指定进度（t<0 清除）
+  setTransitionPreviewController((id, t) => {
+    const r = renderer
+    if (!r) return
+    if (t < 0) {
+      r.clearPreview()
+      return
+    }
+    const render = getRender(id)
+    if (!render) {
+      r.clearPreview()
+      return
+    }
+    r.showPreview(sampleRenderSegment(render, t))
+  })
 
   interaction = new InteractionController(
     editor,
