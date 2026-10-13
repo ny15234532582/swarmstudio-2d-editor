@@ -726,8 +726,8 @@ function close(): void {
         <!-- 高级模式 -->
         <template v-else>
           <details class="section">
-            <summary class="title" title="决定谁飞到哪个点：求解器=配对策略；权重=偏好（距离/均匀/方向/分组/顺序/半径/极角）">
-              求解器与加权评分
+            <summary class="title" title="决定谁飞到哪个点：选择配对用的算法">
+              求解器
             </summary>
             <label class="field">
               <span>求解器</span>
@@ -739,6 +739,22 @@ function close(): void {
                 <option value="index">按索引</option>
               </select>
             </label>
+            <label class="field" title="每个点只在最近的 K 个候选里配对（0=全局最优，越大越慢越准）">
+              <span>候选近邻数 K（0=全部）{{ form.params.neighborLimit }}</span>
+              <input v-model.number="form.params.neighborLimit" type="range" min="0" max="50" step="1" />
+            </label>
+            <label v-if="form.algorithm === 'auction'" class="field" title="拍卖算法的每次加价步长：越小越接近最优但越慢">
+              <span>ε 投标增量 {{ form.params.epsilon }}</span>
+              <input v-model.number="form.params.epsilon" type="range" min="0.005" max="0.5" step="0.005" />
+            </label>
+            <label v-if="form.algorithm === 'bottleneck'" class="field row" title="先让最长的那个配对尽量短，再在其基础上让总距离最短">
+              <input v-model.number="form.params.secondaryMinTotal" type="checkbox" :true-value="1" :false-value="0" />
+              <span>次级目标：最大得分最优后，总得分最短</span>
+            </label>
+          </details>
+
+          <details class="section">
+            <summary class="title" title="各项代价的加权：总分 = 各权重 × 对应代价 之和，权重越大越偏向该项">加权评分</summary>
             <div class="hint">
               配对时会计算"总分 = 各权重 × 对应代价"之和，再据此择优；权重越大越偏向该项（0 = 不启用该项）。
             </div>
@@ -798,18 +814,6 @@ function close(): void {
             <label class="field" title="尽量保持绕中心的角度不变（保持旋转排布不扭转）">
               <span>保持极角权重 {{ form.params.wAngular }}（绕中心角度不变）</span>
               <input v-model.number="form.params.wAngular" type="range" min="0" max="2" step="0.05" />
-            </label>
-            <label class="field" title="每个点只在最近的 K 个候选里配对（0=全局最优，越大越慢越准）">
-              <span>候选近邻数 K（0=全部）{{ form.params.neighborLimit }}</span>
-              <input v-model.number="form.params.neighborLimit" type="range" min="0" max="50" step="1" />
-            </label>
-            <label v-if="form.algorithm === 'auction'" class="field" title="拍卖算法的每次加价步长：越小越接近最优但越慢">
-              <span>ε 投标增量 {{ form.params.epsilon }}</span>
-              <input v-model.number="form.params.epsilon" type="range" min="0.005" max="0.5" step="0.005" />
-            </label>
-            <label v-if="form.algorithm === 'bottleneck'" class="field row" title="先让最长的那个配对尽量短，再在其基础上让总距离最短">
-              <input v-model.number="form.params.secondaryMinTotal" type="checkbox" :true-value="1" :false-value="0" />
-              <span>次级目标：最大得分最优后，总得分最短</span>
             </label>
           </details>
 
