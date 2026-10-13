@@ -727,7 +727,7 @@ function close(): void {
         <template v-else>
           <details class="section">
             <summary class="title" title="决定谁飞到哪个点：求解器=配对策略；权重=偏好（距离/均匀/方向/分组/顺序/半径/极角）">
-              求解器 + 加权评分
+              求解器与加权评分
             </summary>
             <label class="field">
               <span>求解器</span>
@@ -808,14 +808,10 @@ function close(): void {
               <input v-model.number="form.params.secondaryMinTotal" type="checkbox" :true-value="1" :false-value="0" />
               <span>次级目标：最大得分最优后，总得分最短</span>
             </label>
-            <label class="field row">
-              <input v-model.number="form.params.avoid" type="checkbox" :true-value="1" :false-value="0" />
-              <span>深度分层避让（直线打底，沿深度轴给冲突机分层，间距 ≥1.5）</span>
-            </label>
           </details>
 
           <details class="section">
-            <summary class="title" title="无人机的空间走法：直线 / 弧线 / 贝塞尔曲线">路径（空间形状）</summary>
+            <summary class="title" title="无人机的空间走法：直线 / 弧线 / 贝塞尔曲线">路径</summary>
             <label class="field">
               <span>轨迹</span>
               <select v-model="form.path">
@@ -843,7 +839,7 @@ function close(): void {
           </details>
 
           <details class="section">
-            <summary class="title" title="随时间变化的快慢：速度剖面决定速度曲线形状；时长决定整体快慢">速度剖面 / 时间</summary>
+            <summary class="title" title="随时间变化的快慢：速度剖面决定速度曲线形状；时长决定整体快慢；错峰决定谁先出发">速度剖面与时间</summary>
             <label class="field">
               <span>速度剖面</span>
               <select v-model="form.velocityProfile">
@@ -877,15 +873,11 @@ function close(): void {
               <span>时长（秒）</span>
               <input v-model.number="form.duration" type="number" min="0.1" step="0.1" />
             </label>
-          </details>
-
-          <details class="section">
-            <summary class="title" title="谁先出发：错峰总时长越大，出发越分散；错峰顺序决定按什么排序">相位（谁先出发）</summary>
-            <label class="field">
+            <label class="field" title="错峰总时长：越大出发越分散（0=同时出发）">
               <span>错峰总时长（秒）</span>
               <input v-model.number="form.stagger" type="number" min="0" step="0.1" />
             </label>
-            <label v-if="form.stagger > 0" class="field">
+            <label v-if="form.stagger > 0" class="field" title="按什么顺序错峰出发">
               <span>错峰顺序</span>
               <select v-model.number="form.params.staggerOrder">
                 <option :value="0">按序号</option>
@@ -924,10 +916,14 @@ function close(): void {
           <details class="section">
             <summary
               class="title"
-              title="安全检测的硬约束：不满足这些限值就不能保存。可按机型/更严要求调整（0=用系统默认）"
+              title="去冲突与安全底线：深度分层避让解决交叉；限值为硬约束，不满足不能保存（0=用系统默认）"
             >
-              安全限值（可配置 · 不通过不能保存）
+              安全与避让
             </summary>
+            <label class="field row" title="直线打底，仅沿深度轴给冲突机分层（不改正面画面）">
+              <input v-model.number="form.params.avoid" type="checkbox" :true-value="1" :false-value="0" />
+              <span>深度分层避让</span>
+            </label>
             <div class="row">
               <label class="field">
                 <span>最小间距（米）≥</span>
