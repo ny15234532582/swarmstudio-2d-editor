@@ -1,6 +1,7 @@
 一套加权评分
-  score = wDist·dᵖ + wEven·|d−d*| + wAngle + wGroup + wOrder + wRadial + wAngular
-  （总路程 / 均匀度 / 方向一致 / 同组 / 顺序 / 半径 / 极角，权重可调，还可加邻居上限 K 等约束）
+  score = wDist·(d/对角线) + wEven·min(1,|d−d*|/d*) + wAngle·(1−cos)/2 + wGroup + wOrder·|名次差|/(n−1) + wRadial·|Δr|/对角线 + wAngular·Δθ/π
+  （总路程 / 均匀度 / 方向一致 / 同组 / 顺序 / 半径 / 极角）
+  **每一项都先归一到 [0,1]**，量纲一致 → 权重才表示"相对重要性"；权重可调，还可加邻居上限 K 等约束。
 
   评分模型把多个目标做成可调权重，然后使用5个求解器在评分上求解
 

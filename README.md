@@ -162,8 +162,8 @@ interface Point { id; x; y; z; r; g; b; frameId; droneIndex?; groupId?; locked? 
 - 项目固定 `droneCount`（无人机总数）；每帧图片按最小间距采样，超过上限则自动增大步长压回上限，
   因此每帧只用其中一部分无人机（数量可不同）。
 - 过渡（分层，参数丰富）：相邻帧之间的独立区段，`duration` / `stagger` 可调。界面上分**简单/高级**两档，普通用户选风格预设即可。
-  - ① 分配 = **加权评分 + 求解器**：`score = Σ wₖ·项ₖ`，项含
-    `wDist·dᵖ`(总路程)、`wEven·|d−d*|`(**均匀度**，可让各点移动距离更接近)、`wAngle`(方向一致)、`wGroup`(同组)、`wOrder`(保持顺序)、`wRadial`(保持半径)、`wAngular`(保持极角)；
+  - ① 分配 = **加权评分 + 求解器**：`score = Σ wₖ·项ₖ`，每项都**归一到 [0,1]**（量纲一致，权重才表示"相对重要性"），项含
+    `wDist·(d/对角线)`(总路程)、`wEven·min(1,|d−d*|/d*)`(**均匀度**，可让各点移动距离更接近)、`wAngle·(1−cos)/2`(方向一致)、`wGroup`(同组，0/1)、`wOrder·|名次差|/(n−1)`(保持顺序)、`wRadial·|Δr|/对角线`(保持半径)、`wAngular·Δθ/π`(保持极角)；
     求解器 `algorithm`：匈牙利（最小化总得分）/ 拍卖（近似）/ 瓶颈（**最小化最大得分**，默认）/ 最近邻 / 按索引；
     可调 `neighborLimit`(候选近邻，源∪目标并集)、`epsilon`、`secondaryMinTotal`；均匀度用**迭代目标距离 d\***实现（`targetDistance/evenIterations/evenMode`）；
   - ② 路径 `path`：直线 / 弧线 / 三次贝塞尔；可调 `curvature`、`arcDirection`、`waveAmp`；

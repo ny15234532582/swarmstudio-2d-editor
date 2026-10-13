@@ -105,7 +105,6 @@ export const SCORE_TERMS = 7
 
 interface Weights {
   dist: number
-  p: number
   even: number
   evenMode: number
   angle: number
@@ -189,7 +188,6 @@ function bboxDiagonal(a: Point[], b: Point[]): number {
 function readWeights(params: Record<string, number>): Weights {
   return {
     dist: params.wDist ?? 1,
-    p: params.costPower ?? 1,
     even: params.wEven ?? 0,
     evenMode: params.evenMode ?? 0,
     angle: params.wAngle ?? 0,
@@ -231,18 +229,27 @@ function allowedEdge(ctx: MatchCtx, i: number, j: number): boolean {
   return ctx.allowed === null || ctx.allowed[i][j]
 }
 
-/** 每项得分（未加权）：dist / angle / group / order / radial / angular（均匀项依赖 target） */
+/**
+ * 每项得分（未加权），**统一归一到 [0,1]**，这样各项量纲一致、权重才表示"相对重要性"。
+ *  - dist：d / 包围盒对角线
+ *  - even：|d − d*| / d*
+ *  - angle：(1 − cos)/2
+ *  - group：0/1
+ *  - order：|名次差| / (n − 1)
+ *  - radial：|rA − rB| / 对角线
+ *  - angular：Δθ / π
+ */
 function edgeScoreParts(ctx: MatchCtx, i: number, j: number): number[] {
   const ai = ctx.a[i]
   const bj = ctx.b[j]
   const d = dist(ai, bj)
   const dn = d / ctx.refDist
-  const distTerm = Math.pow(dn, ctx.w.p)
+  const distTerm = Math.min(1, dn)
 
   let evenTerm = 0
   if (ctx.w.even > 0 && ctx.target > 0) {
     const dev = ctx.w.evenMode === 1 ? (d - ctx.target) * (d - ctx.target) : Math.abs(d - ctx.target)
-    evenTerm = Math.min(100, dev / ctx.target)
+    evenTerm = Math.min(1, dev / ctx.target)
   }
 
   let angleTerm = 0
@@ -253,8 +260,9 @@ function edgeScoreParts(ctx: MatchCtx, i: number, j: number): number[] {
   }
 
   const groupTerm = ctx.w.group > 0 && ai.groupId && bj.groupId && ai.groupId !== bj.groupId ? 1 : 0
-  const orderTerm = ctx.w.order > 0 ? Math.abs(ctx.rankA[i] - ctx.rankB[j]) : 0
-  const radialTerm = ctx.w.radial > 0 ? Math.abs(ctx.radialA[i] - ctx.radialB[j]) / ctx.refDist : 0
+  const n = Math.max(1, Math.max(ctx.a.length, ctx.b.length) - 1)
+  const orderTerm = ctx.w.order > 0 ? Math.abs(ctx.rankA[i] - ctx.rankB[j]) / n : 0
+  const radialTerm = ctx.w.radial > 0 ? Math.min(1, Math.abs(ctx.radialA[i] - ctx.radialB[j]) / ctx.refDist) : 0
 
   let angularTerm = 0
   if (ctx.w.angular > 0) {
@@ -1058,7 +1066,7 @@ export interface RenderPayload {
 
 /** 只影响「匹配」的参数键（用于签名判定是否过期） */
 const MATCH_SIG_KEYS = [
-  'wDist', 'costPower', 'wEven', 'evenMode', 'targetDistance', 'evenIterations',
+  'wDist', 'wEven', 'evenMode', 'targetDistance', 'evenIterations',
   'wAngle', 'wGroup', 'wOrder', 'rankAxis', 'wRadial', 'wAngular',
   'neighborLimit', 'epsilon', 'secondaryMinTotal',
 ]

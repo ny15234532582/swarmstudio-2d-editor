@@ -197,11 +197,14 @@ describe('transition 引擎', () => {
     expect(Math.abs(s[0].y)).toBeGreaterThan(0.1)
   })
 
-  it('代价指数 p 生效且仍完成匹配', () => {
-    const a = [pt('a0', 0, 0), pt('a1', 10, 0)]
-    const b = [pt('b0', 1, 0, 'f2'), pt('b1', 11, 0, 'f2')]
-    const plan = planTransition(a, b, trans('hungarian', { params: { costPower: 2 } }))
-    expect(plan.pairs).toHaveLength(2)
+  it('加权评分为线性：整体缩放权重不改变结果（各项已归一到 [0,1]）', () => {
+    const a = [pt('a0', 0, 0), pt('a1', 10, 0), pt('a2', 20, 0)]
+    const b = [pt('b0', 10, 0, 'f2'), pt('b1', 0, 0, 'f2'), pt('b2', 30, 0, 'f2')]
+    const p1 = planTransition(a, b, trans('hungarian', { params: { wDist: 1 } }))
+    const p2 = planTransition(a, b, trans('hungarian', { params: { wDist: 3 } }))
+    expect(p1.pairs.map((x) => [x.from.id, x.to.id])).toEqual(
+      p2.pairs.map((x) => [x.from.id, x.to.id]),
+    )
   })
 
   it('候选近邻 K：并集候选，不孤立目标点（不会直接出现在终点）', () => {

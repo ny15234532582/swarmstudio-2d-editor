@@ -42,7 +42,7 @@ const props = defineProps<{ state: EditorState | null }>()
 const emit = defineEmits<{ (e: 'close'): void; (e: 'preview', id: string): void }>()
 
 const DEFAULT_PARAMS: Record<string, number> = {
-  wDist: 1, costPower: 1,
+  wDist: 1,
   wEven: 0, evenMode: 0, targetDistance: 0, evenIterations: 6,
   wAngle: 0, wGroup: 0,
   wOrder: 0, rankAxis: 0,
@@ -135,11 +135,11 @@ interface Preset {
 }
 const PRESETS: Preset[] = [
   { key: 'shortest', label: '最短路程', hint: '总路程最短', algorithm: 'hungarian', path: 'linear', velocityProfile: 'ease', easing: 'easeInOut', duration: 3, stagger: 0, params: W({ wDist: 1 }) },
-  { key: 'even', label: '最均匀', hint: '各点移动距离尽量相等', algorithm: 'hungarian', path: 'linear', velocityProfile: 'ease', easing: 'easeInOut', duration: 3, stagger: 0, params: W({ wDist: 0.2, wEven: 1 }) },
+  { key: 'even', label: '最均匀', hint: '各点移动距离尽量相等', algorithm: 'hungarian', path: 'linear', velocityProfile: 'ease', easing: 'easeInOut', duration: 3, stagger: 0, params: W({ wDist: 0.3, wEven: 3 }) },
   { key: 'parallel', label: '平行流动', hint: '方向一致、少交叉', algorithm: 'hungarian', path: 'linear', velocityProfile: 'ease', easing: 'easeInOut', duration: 3, stagger: 0, params: W({ wDist: 0.5, wAngle: 1 }) },
   { key: 'group', label: '保持分组', hint: '同组尽量互配', algorithm: 'hungarian', path: 'linear', velocityProfile: 'ease', easing: 'easeInOut', duration: 3, stagger: 0, params: W({ wDist: 0.5, wGroup: 1 }) },
   { key: 'ring', label: '保持环状', hint: '保持半径与极角', algorithm: 'hungarian', path: 'linear', velocityProfile: 'ease', easing: 'easeInOut', duration: 3, stagger: 0, params: W({ wDist: 0.5, wRadial: 1, wAngular: 0.5 }) },
-  { key: 'order', label: '顺序流动', hint: '保持相对顺序', algorithm: 'hungarian', path: 'linear', velocityProfile: 'ease', easing: 'easeInOut', duration: 3, stagger: 0, params: W({ wDist: 0.5, wOrder: 1 }) },
+  { key: 'order', label: '顺序流动', hint: '保持相对顺序', algorithm: 'hungarian', path: 'linear', velocityProfile: 'ease', easing: 'easeInOut', duration: 3, stagger: 0, params: W({ wDist: 0.3, wOrder: 1.5 }) },
   { key: 'fast', label: '快速会聚', hint: '最小化最大距离、更快', algorithm: 'bottleneck', path: 'linear', velocityProfile: 'trapezoid', easing: 'easeInOut', duration: 2, stagger: 0, params: W({ wDist: 1 }) },
 ]
 
@@ -762,10 +762,6 @@ function close(): void {
               <span>距离权重 {{ form.params.wDist }}（就近配对）</span>
               <input v-model.number="form.params.wDist" type="range" min="0" max="5" step="0.1" />
             </label>
-            <label class="field" title="距离的幂次：p 越大越严厉惩罚长距离（结果更均衡）">
-              <span>代价指数 p（dᵖ）{{ form.params.costPower }}（惩罚长距离）</span>
-              <input v-model.number="form.params.costPower" type="range" min="1" max="4" step="0.25" />
-            </label>
             <label class="field" title="让各架无人机的移动距离尽量相等（接近目标距离 d*）">
               <span>均匀度权重 {{ form.params.wEven }}（距离尽量相等）</span>
               <input v-model.number="form.params.wEven" type="range" min="0" max="5" step="0.1" />
@@ -1275,7 +1271,7 @@ details:not([open]) > summary.title {
   font-size: 12px;
   line-height: 1.5;
   color: var(--text-dim);
-  margin-bottom: 6px;
+  margin-bottom: 12px;
 }
 .badge {
   display: inline-block;
