@@ -10,20 +10,14 @@
  * 产物本随工程/过渡，可删除；编辑帧或参数不会自动更新已保存产物，需重新【应用】+【保存】。
  */
 import { computed, reactive, ref, watch } from 'vue'
-import {
-  droneLimits,
-  editor,
-  getPointsByFrame,
-  setDroneLimits,
-  showTrails,
-  showTransitionPreviewAt,
-} from '../editor'
+import { editor, getPointsByFrame, showTrails, showTransitionPreviewAt } from '../editor'
 import { service } from '../projects'
 import { buildRender, renderSignature, type RenderAssignment } from '../../core/transition'
 import {
   SAFETY_LIMITS,
   minDurationForLimits,
   shortestDurationForLimits,
+  type SafetyLimits,
   type SafetyResult,
 } from '../../core/safety'
 import {
@@ -59,7 +53,26 @@ const DEFAULT_PARAMS: Record<string, number> = {
   staggerOrder: 0,
   minSeparation: 0, separationStrength: 0.5, separationIterations: 1,
   unusedMode: 0, parkGap: 0, parkSpacing: 0, parkDim: 0.25,
+  // 安全限值（可配置；0=用系统默认 SAFETY_LIMITS）
+  limMinSeparation: SAFETY_LIMITS.minSeparation,
+  limHSpeed: SAFETY_LIMITS.hSpeed,
+  limUpSpeed: SAFETY_LIMITS.upSpeed,
+  limDownSpeed: SAFETY_LIMITS.downSpeed,
+  limHAccel: SAFETY_LIMITS.hAccel,
+  limUpAccel: SAFETY_LIMITS.upAccel,
+  limDownAccel: SAFETY_LIMITS.downAccel,
 }
+
+/** 安全限值的参数键（用于 UI 与保留） */
+const LIMIT_KEYS = [
+  'limMinSeparation',
+  'limHSpeed',
+  'limUpSpeed',
+  'limDownSpeed',
+  'limHAccel',
+  'limUpAccel',
+  'limDownAccel',
+] as const
 
 const form = reactive<Transition>({
   id: '',
@@ -82,8 +95,6 @@ const statsOpen = ref(false)
 function closeStats(): void {
   statsOpen.value = false
 }
-const limitSpeed = ref(0)
-const limitAccel = ref(0)
 const rendering = ref(false)
 const persisted = ref(false)
 const dirty = ref(false)
@@ -152,9 +163,6 @@ const canApply = computed(() => !!form.fromFrameId && !!form.toFrameId)
 /** 打开时按模式初始化表单 */
 function setupForm(): void {
   syncing = true
-  const limits = droneLimits.value
-  limitSpeed.value = limits.maxSpeed
-  limitAccel.value = limits.maxAccel
   dirty.value = false
   const s = props.state
   if (!s) return
@@ -215,13 +223,26 @@ const avoidInfo = computed(() => {
   return { colors: a.colors, maxDepth: maxL * a.spacing }
 })
 
-// 上限：优先过渡级覆盖，其次项目级设置，最后回退到固定安全限值（保证图表/占比有分母）
-const effMaxSpeed = computed(
-  () => form.params.maxSpeedOverride || limitSpeed.value || SAFETY_LIMITS.hSpeed,
-)
-const effMaxAccel = computed(
-  () => form.params.maxAccelOverride || limitAccel.value || SAFETY_LIMITS.hAccel,
-)
+/** 生效的安全限值：参数 >0 用参数，否则回退系统默认 SAFETY_LIMITS */
+function effectiveLimits(): SafetyLimits {
+  const pick = (k: string, d: number) => {
+    const v = Number(form.params[k])
+    return Number.isFinite(v) && v > 0 ? v : d
+  }
+  return {
+    minSeparation: pick('limMinSeparation', SAFETY_LIMITS.minSeparation),
+    hSpeed: pick('limHSpeed', SAFETY_LIMITS.hSpeed),
+    upSpeed: pick('limUpSpeed', SAFETY_LIMITS.upSpeed),
+    downSpeed: pick('limDownSpeed', SAFETY_LIMITS.downSpeed),
+    hAccel: pick('limHAccel', SAFETY_LIMITS.hAccel),
+    upAccel: pick('limUpAccel', SAFETY_LIMITS.upAccel),
+    downAccel: pick('limDownAccel', SAFETY_LIMITS.downAccel),
+  }
+}
+
+// 统计超限标红阈值：用生效的安全限值（水平速度/水平加速度）
+const effMaxSpeed = computed(() => effectiveLimits().hSpeed)
+const effMaxAccel = computed(() => effectiveLimits().hAccel)
 const speedOver = computed(() => effMaxSpeed.value > 0 && !!stats.value && stats.value.peakSpeed > effMaxSpeed.value)
 const accelOver = computed(() => effMaxAccel.value > 0 && !!stats.value && stats.value.peakAccel > effMaxAccel.value)
 
@@ -256,7 +277,7 @@ async function doPreview(): Promise<boolean> {
       a,
       b,
       transition,
-      transition.params.avoid ? SAFETY_LIMITS.minSeparation : 0,
+      transition.params.avoid ? effectiveLimits().minSeparation : 0,
     )
     lastElapsed = assignment.elapsedMs
     lastAssignment = assignment
@@ -279,7 +300,7 @@ async function runSafety(): Promise<void> {
   }
   checking.value = true
   try {
-    safety.value = await getRenderClient().safety(r, SAFETY_LIMITS, 30)
+    safety.value = await getRenderClient().safety(r, effectiveLimits(), 30)
   } catch {
     safety.value = null
   } finally {
@@ -296,7 +317,7 @@ async function autoFitSafety(): Promise<void> {
     const s = safety.value
     if (!s || s.pass) return
     // 速度/加速度 → 反推最小时长
-    const t = minDurationForLimits(s.metrics, SAFETY_LIMITS, form.duration)
+    const t = minDurationForLimits(s.metrics, effectiveLimits(), form.duration)
     if (t > form.duration + 1e-6) form.duration = Math.max(0.1, Math.ceil(t * 10) / 10)
     // 间距（交叉）→ 开启深度分层避让即可彻底解决（不用逐帧斥力：会抖动、并抬高速度）
     if (s.failures.includes('minSeparation')) form.params.avoid = 1
@@ -377,9 +398,10 @@ interface CheckItem {
 const safetyItems = computed<CheckItem[]>(() => {
   const s = safety.value
   if (!s) return []
+  const limits = effectiveLimits()
   return METRIC_ORDER.map((k) => {
     const value = s.metrics[k]
-    const limit = SAFETY_LIMITS[k]
+    const limit = limits[k]
     const pass = k === 'minSeparation' ? value >= limit - 1e-9 : value <= limit + 1e-9
     return { key: k, label: METRIC_LABELS[k], unit: METRIC_UNITS[k], value, limit, pass }
   })
@@ -409,7 +431,7 @@ function computeMinDuration(): void {
     minDuration.value = null
     return
   }
-  const est = shortestDurationForLimits(s.metrics, SAFETY_LIMITS, form.duration)
+  const est = shortestDurationForLimits(s.metrics, effectiveLimits(), form.duration)
   minDuration.value = Math.max(0.1, Math.round(est * 10) / 10)
 }
 
@@ -429,18 +451,18 @@ async function confirmMinDuration(): Promise<void> {
   const byFrame = getPointsByFrame()
   const a = byFrame.get(form.fromFrameId) ?? []
   const b = byFrame.get(form.toFrameId) ?? []
+  const limits = effectiveLimits()
   const base = snapshot()
-  let target =
-    Math.max(0.1, Math.round(shortestDurationForLimits(s.metrics, SAFETY_LIMITS, form.duration) * 10) / 10)
+  let target = Math.max(0.1, Math.round(shortestDurationForLimits(s.metrics, limits, form.duration) * 10) / 10)
   let verified: number | null = null
   for (let i = 0; i < 4; i++) {
     const render = buildRender(a, b, { ...base, duration: target }, assignment)
-    const res = await getRenderClient().safety(render, SAFETY_LIMITS, 30)
+    const res = await getRenderClient().safety(render, limits, 30)
     if (!res.failures.some((f) => f !== 'minSeparation')) {
       verified = target
       break
     }
-    const re = shortestDurationForLimits(res.metrics, SAFETY_LIMITS, target)
+    const re = shortestDurationForLimits(res.metrics, limits, target)
     target = Math.max(
       Math.round(re * 10) / 10,
       Math.round(target * 1.02 * 10) / 10,
@@ -598,6 +620,7 @@ const PRESERVE_KEYS = [
   'staggerOrder',
   'maxSpeedOverride',
   'maxAccelOverride',
+  ...LIMIT_KEYS,
 ]
 
 function applyPreset(p: Preset): void {
@@ -610,10 +633,6 @@ function applyPreset(p: Preset): void {
   for (const k of PRESERVE_KEYS) kept[k] = Number(form.params[k]) || 0
   form.params = { ...DEFAULT_PARAMS, ...p.params, ...kept }
   // 不改 form.duration / form.stagger：时长与错落完全由【节奏】控制
-}
-
-function applyLimits(): void {
-  setDroneLimits({ maxSpeed: Number(limitSpeed.value) || 0, maxAccel: Number(limitAccel.value) || 0 })
 }
 
 /** 重置为默认：等同“新建过渡”的初始状态（默认风格 + 默认时长/错落 + 缺省参数） */
@@ -903,15 +922,46 @@ function close(): void {
           </div>
 
           <div class="section">
-            <div class="title">安全限值（超限提示用，不改变飞行）</div>
+            <div
+              class="title"
+              title="安全检测的硬约束：不满足这些限值就不能保存。可按机型/更严要求调整（0=用系统默认）"
+            >
+              安全限值（可配置 · 不通过不能保存）
+            </div>
             <div class="row">
               <label class="field">
-                <span>最大速度</span>
-                <input v-model.number="limitSpeed" type="number" min="0" step="1" @change="applyLimits" />
+                <span>最小间距（米）≥</span>
+                <input v-model.number="form.params.limMinSeparation" type="number" min="0" step="0.1" />
               </label>
               <label class="field">
-                <span>最大加速度</span>
-                <input v-model.number="limitAccel" type="number" min="0" step="1" @change="applyLimits" />
+                <span>水平速度 ≤</span>
+                <input v-model.number="form.params.limHSpeed" type="number" min="0" step="0.1" />
+              </label>
+            </div>
+            <div class="row">
+              <label class="field">
+                <span>上升速度 ≤</span>
+                <input v-model.number="form.params.limUpSpeed" type="number" min="0" step="0.1" />
+              </label>
+              <label class="field">
+                <span>下降速度 ≤</span>
+                <input v-model.number="form.params.limDownSpeed" type="number" min="0" step="0.1" />
+              </label>
+            </div>
+            <div class="row">
+              <label class="field">
+                <span>水平加速度 ≤</span>
+                <input v-model.number="form.params.limHAccel" type="number" min="0" step="0.1" />
+              </label>
+              <label class="field">
+                <span>上升加速度 ≤</span>
+                <input v-model.number="form.params.limUpAccel" type="number" min="0" step="0.1" />
+              </label>
+            </div>
+            <div class="row">
+              <label class="field">
+                <span>下降加速度 ≤</span>
+                <input v-model.number="form.params.limDownAccel" type="number" min="0" step="0.1" />
               </label>
             </div>
           </div>
