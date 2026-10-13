@@ -725,7 +725,7 @@ function close(): void {
 
         <!-- 高级模式 -->
         <template v-else>
-          <details class="section" open>
+          <details class="section">
             <summary class="title" title="决定谁飞到哪个点：求解器=配对策略；权重=偏好（距离/均匀/方向/分组/顺序/半径/极角）">
               求解器 + 加权评分
             </summary>
@@ -814,7 +814,7 @@ function close(): void {
             </label>
           </details>
 
-          <details class="section" open>
+          <details class="section">
             <summary class="title" title="无人机的空间走法：直线 / 弧线 / 贝塞尔曲线">路径（空间形状）</summary>
             <label class="field">
               <span>轨迹</span>
@@ -842,7 +842,7 @@ function close(): void {
             </label>
           </details>
 
-          <details class="section" open>
+          <details class="section">
             <summary class="title" title="随时间变化的快慢：速度剖面决定速度曲线形状；时长决定整体快慢">速度剖面 / 时间</summary>
             <label class="field">
               <span>速度剖面</span>
@@ -879,7 +879,7 @@ function close(): void {
             </label>
           </details>
 
-          <details class="section" open>
+          <details class="section">
             <summary class="title" title="谁先出发：错峰总时长越大，出发越分散；错峰顺序决定按什么排序">相位（谁先出发）</summary>
             <label class="field">
               <span>错峰总时长（秒）</span>
@@ -896,7 +896,7 @@ function close(): void {
             </label>
           </details>
 
-          <details class="section" open>
+          <details class="section">
             <summary class="title" title="两帧数量不同的无人机：多余的一方如何处理">未使用无人机</summary>
             <label class="field">
               <span>处理方式</span>
@@ -921,7 +921,7 @@ function close(): void {
             </template>
           </details>
 
-          <details class="section" open>
+          <details class="section">
             <summary
               class="title"
               title="安全检测的硬约束：不满足这些限值就不能保存。可按机型/更严要求调整（0=用系统默认）"
@@ -1224,6 +1224,9 @@ summary.title::before {
 }
 details[open] > summary.title::before {
   content: '▾';
+}
+details:not([open]) > summary.title {
+  margin-bottom: 0;
 }
 .field {
   display: flex;
