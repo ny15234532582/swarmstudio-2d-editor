@@ -78,7 +78,6 @@ const open = computed(() => !!props.state)
 const mode = computed(() => props.state?.mode ?? 'new')
 
 const simple = ref(true)
-const showAdvanced = ref(false)
 const statsOpen = ref(false)
 function closeStats(): void {
   statsOpen.value = false
@@ -290,7 +289,7 @@ async function runSafety(): Promise<void> {
 
 // 注：安全检测改为在「确认修改」弹窗流程里执行（见 startConfirm），不再自动跑。
 
-/** 一键安全适配：迭代调「时长（速度/加速度）+ 斥力·错峰（间距）」直到通过或放弃 */
+/** 一键安全适配：时长（速度/加速度）+ 开启深度分层避让（间距）直到通过或放弃 */
 async function autoFitSafety(): Promise<void> {
   for (let attempt = 0; attempt < 4; attempt++) {
     await runSafety()
@@ -299,12 +298,8 @@ async function autoFitSafety(): Promise<void> {
     // 速度/加速度 → 反推最小时长
     const t = minDurationForLimits(s.metrics, SAFETY_LIMITS, form.duration)
     if (t > form.duration + 1e-6) form.duration = Math.max(0.1, Math.ceil(t * 10) / 10)
-    // 间距（交叉）→ 开启深度分层避让即可彻底解决；
-    // 不用逐帧斥力（会抖动、并抬高速度），也不用错峰（实测无效）
-    if (s.failures.includes('minSeparation')) {
-      form.params.avoid = 1
-      form.params.minSeparation = SAFETY_LIMITS.minSeparation
-    }
+    // 间距（交叉）→ 开启深度分层避让即可彻底解决（不用逐帧斥力：会抖动、并抬高速度）
+    if (s.failures.includes('minSeparation')) form.params.avoid = 1
     await doPreview()
   }
   await runSafety()
@@ -621,6 +616,18 @@ function applyLimits(): void {
   setDroneLimits({ maxSpeed: Number(limitSpeed.value) || 0, maxAccel: Number(limitAccel.value) || 0 })
 }
 
+/** 重置为默认：等同“新建过渡”的初始状态（默认风格 + 默认时长/错落 + 缺省参数） */
+function resetToDefault(): void {
+  const fresh = createTransition(form.fromFrameId, form.toFrameId)
+  form.path = fresh.path
+  form.velocityProfile = fresh.velocityProfile
+  form.easing = fresh.easing
+  form.duration = fresh.duration
+  form.stagger = fresh.stagger
+  form.params = { ...DEFAULT_PARAMS }
+  applyPreset(PRESETS[0])
+}
+
 function close(): void {
   // 关闭面板：同时收掉确认弹窗、清掉预览；保留内存产物（飞行轨迹仍显示）
   stopPreview()
@@ -645,6 +652,9 @@ function close(): void {
         <div class="modebar">
           <button :class="{ on: simple }" @click="simple = true">简单</button>
           <button :class="{ on: !simple }" @click="simple = false">高级</button>
+          <button class="link reset" title="重置为默认（默认风格 + 默认时长/错落）" @click="resetToDefault">
+            重置
+          </button>
         </div>
         <label class="trail-toggle">
           <input type="checkbox" v-model="showTrails" />
@@ -697,7 +707,9 @@ function close(): void {
         <!-- 高级模式 -->
         <template v-else>
           <div class="section">
-            <div class="title">① 求解器 + 加权评分</div>
+            <div class="title" title="决定谁飞到哪个点：求解器=配对策略；权重=偏好（距离/均匀/方向/分组/顺序/半径/极角）">
+              ① 求解器 + 加权评分
+            </div>
             <label class="field">
               <span>求解器</span>
               <select v-model="form.algorithm">
@@ -712,7 +724,7 @@ function close(): void {
               <span>距离权重 {{ form.params.wDist }}</span>
               <input v-model.number="form.params.wDist" type="range" min="0" max="5" step="0.1" />
             </label>
-            <label class="field">
+            <label class="field" title="得分的距离惩罚指数：p 越大越惩罚长距离（结果更均匀）">
               <span>代价指数 p（dᵖ）{{ form.params.costPower }}</span>
               <input v-model.number="form.params.costPower" type="range" min="1" max="4" step="0.25" />
             </label>
@@ -749,7 +761,7 @@ function close(): void {
               <span>保持顺序权重 {{ form.params.wOrder }}</span>
               <input v-model.number="form.params.wOrder" type="range" min="0" max="2" step="0.1" />
             </label>
-            <label v-if="form.params.wOrder > 0" class="field">
+            <label v-if="form.params.wOrder > 0" class="field" title="以哪个轴的坐标顺序作为“保持顺序”的排序依据">
               <span>顺序轴</span>
               <select v-model.number="form.params.rankAxis">
                 <option :value="0">极角</option>
@@ -765,15 +777,15 @@ function close(): void {
               <span>保持极角权重 {{ form.params.wAngular }}</span>
               <input v-model.number="form.params.wAngular" type="range" min="0" max="2" step="0.05" />
             </label>
-            <label class="field">
+            <label class="field" title="每个点只在最近的 K 个候选里配对（0=全局最优，越大越慢越准）">
               <span>候选近邻数 K（0=全部）{{ form.params.neighborLimit }}</span>
               <input v-model.number="form.params.neighborLimit" type="range" min="0" max="50" step="1" />
             </label>
-            <label v-if="form.algorithm === 'auction'" class="field">
+            <label v-if="form.algorithm === 'auction'" class="field" title="拍卖算法的每次加价步长：越小越接近最优但越慢">
               <span>ε 投标增量 {{ form.params.epsilon }}</span>
               <input v-model.number="form.params.epsilon" type="range" min="0.005" max="0.5" step="0.005" />
             </label>
-            <label v-if="form.algorithm === 'bottleneck'" class="field row">
+            <label v-if="form.algorithm === 'bottleneck'" class="field row" title="先让最长的那个配对尽量短，再在其基础上让总距离最短">
               <input v-model.number="form.params.secondaryMinTotal" type="checkbox" :true-value="1" :false-value="0" />
               <span>次级目标：最大得分最优后，总得分最短</span>
             </label>
@@ -784,7 +796,7 @@ function close(): void {
           </div>
 
           <div class="section">
-            <div class="title">② 路径（空间形状）</div>
+            <div class="title" title="无人机的空间走法：直线 / 弧线 / 贝塞尔曲线">② 路径（空间形状）</div>
             <label class="field">
               <span>轨迹</span>
               <select v-model="form.path">
@@ -793,7 +805,7 @@ function close(): void {
                 <option value="bezier">曲线（贝塞尔）</option>
               </select>
             </label>
-            <label v-if="form.path !== 'linear'" class="field">
+            <label v-if="form.path !== 'linear'" class="field" title="弧线/曲线的弯曲程度（正负决定往哪边弯）">
               <span>曲率 {{ form.params.curvature }}</span>
               <input v-model.number="form.params.curvature" type="range" min="-1" max="1" step="0.05" />
             </label>
@@ -812,7 +824,7 @@ function close(): void {
           </div>
 
           <div class="section">
-            <div class="title">③ 速度剖面 / 时间</div>
+            <div class="title" title="随时间变化的快慢：速度剖面决定速度曲线形状；时长决定整体快慢">③ 速度剖面 / 时间</div>
             <label class="field">
               <span>速度剖面</span>
               <select v-model="form.velocityProfile">
@@ -831,7 +843,7 @@ function close(): void {
                 <option value="easeOut">缓出</option>
               </select>
             </label>
-            <label v-if="form.velocityProfile === 'trapezoid'" class="field">
+            <label v-if="form.velocityProfile === 'trapezoid'" class="field" title="梯形速度曲线里加/减速段占比（其余为匀速段）">
               <span>加速占比 {{ form.params.accelRatio }}</span>
               <input v-model.number="form.params.accelRatio" type="range" min="0" max="0.5" step="0.05" />
             </label>
@@ -849,7 +861,7 @@ function close(): void {
           </div>
 
           <div class="section">
-            <div class="title">④ 相位（谁先出发）</div>
+            <div class="title" title="谁先出发：错峰总时长越大，出发越分散；错峰顺序决定按什么排序">④ 相位（谁先出发）</div>
             <label class="field">
               <span>错峰总时长（秒）</span>
               <input v-model.number="form.stagger" type="number" min="0" step="0.1" />
@@ -866,7 +878,7 @@ function close(): void {
           </div>
 
           <div class="section">
-            <div class="title">⑤ 未使用无人机</div>
+            <div class="title" title="两帧数量不同的无人机：多余的一方如何处理">⑤ 未使用无人机</div>
             <label class="field">
               <span>处理方式</span>
               <select v-model.number="form.params.unusedMode">
@@ -891,31 +903,7 @@ function close(): void {
           </div>
 
           <div class="section">
-            <button class="link" @click="showAdvanced = !showAdvanced">
-              {{ showAdvanced ? '▾' : '▸' }} 高级参数
-            </button>
-            <template v-if="showAdvanced">
-              <label class="field">
-                <span>过渡级最大速度（0=用项目）</span>
-                <input v-model.number="form.params.maxSpeedOverride" type="number" min="0" step="1" />
-              </label>
-              <label class="field">
-                <span>过渡级最大加速度（0=用项目）</span>
-                <input v-model.number="form.params.maxAccelOverride" type="number" min="0" step="1" />
-              </label>
-              <label class="field">
-                <span>最小间距（斥力）{{ form.params.minSeparation }}</span>
-                <input v-model.number="form.params.minSeparation" type="number" min="0" step="1" />
-              </label>
-              <label class="field">
-                <span>斥力强度 {{ form.params.separationStrength }}</span>
-                <input v-model.number="form.params.separationStrength" type="range" min="0" max="1" step="0.05" />
-              </label>
-            </template>
-          </div>
-
-          <div class="section">
-            <div class="title">无人机能力上限（项目级）</div>
+            <div class="title">安全限值（超限提示用，不改变飞行）</div>
             <div class="row">
               <label class="field">
                 <span>最大速度</span>
@@ -1123,6 +1111,13 @@ function close(): void {
   background: var(--accent);
   color: #04121b;
   border-color: var(--accent);
+}
+.modebar .reset {
+  flex: 0 0 auto;
+  background: transparent;
+  border: none;
+  color: var(--text-dim);
+  padding: 6px 2px;
 }
 .trail-toggle {
   display: flex;
