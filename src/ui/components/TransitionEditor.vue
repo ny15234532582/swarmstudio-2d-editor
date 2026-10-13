@@ -725,10 +725,10 @@ function close(): void {
 
         <!-- 高级模式 -->
         <template v-else>
-          <div class="section">
-            <div class="title" title="决定谁飞到哪个点：求解器=配对策略；权重=偏好（距离/均匀/方向/分组/顺序/半径/极角）">
-              ① 求解器 + 加权评分
-            </div>
+          <details class="section" open>
+            <summary class="title" title="决定谁飞到哪个点：求解器=配对策略；权重=偏好（距离/均匀/方向/分组/顺序/半径/极角）">
+              求解器 + 加权评分
+            </summary>
             <label class="field">
               <span>求解器</span>
               <select v-model="form.algorithm">
@@ -812,10 +812,10 @@ function close(): void {
               <input v-model.number="form.params.avoid" type="checkbox" :true-value="1" :false-value="0" />
               <span>深度分层避让（直线打底，沿深度轴给冲突机分层，间距 ≥1.5）</span>
             </label>
-          </div>
+          </details>
 
-          <div class="section">
-            <div class="title" title="无人机的空间走法：直线 / 弧线 / 贝塞尔曲线">② 路径（空间形状）</div>
+          <details class="section" open>
+            <summary class="title" title="无人机的空间走法：直线 / 弧线 / 贝塞尔曲线">路径（空间形状）</summary>
             <label class="field">
               <span>轨迹</span>
               <select v-model="form.path">
@@ -840,10 +840,10 @@ function close(): void {
               <span>S 形幅度 {{ form.params.waveAmp }}</span>
               <input v-model.number="form.params.waveAmp" type="range" min="-1" max="1" step="0.05" />
             </label>
-          </div>
+          </details>
 
-          <div class="section">
-            <div class="title" title="随时间变化的快慢：速度剖面决定速度曲线形状；时长决定整体快慢">③ 速度剖面 / 时间</div>
+          <details class="section" open>
+            <summary class="title" title="随时间变化的快慢：速度剖面决定速度曲线形状；时长决定整体快慢">速度剖面 / 时间</summary>
             <label class="field">
               <span>速度剖面</span>
               <select v-model="form.velocityProfile">
@@ -877,10 +877,10 @@ function close(): void {
               <span>时长（秒）</span>
               <input v-model.number="form.duration" type="number" min="0.1" step="0.1" />
             </label>
-          </div>
+          </details>
 
-          <div class="section">
-            <div class="title" title="谁先出发：错峰总时长越大，出发越分散；错峰顺序决定按什么排序">④ 相位（谁先出发）</div>
+          <details class="section" open>
+            <summary class="title" title="谁先出发：错峰总时长越大，出发越分散；错峰顺序决定按什么排序">相位（谁先出发）</summary>
             <label class="field">
               <span>错峰总时长（秒）</span>
               <input v-model.number="form.stagger" type="number" min="0" step="0.1" />
@@ -894,10 +894,10 @@ function close(): void {
                 <option :value="3">随机</option>
               </select>
             </label>
-          </div>
+          </details>
 
-          <div class="section">
-            <div class="title" title="两帧数量不同的无人机：多余的一方如何处理">⑤ 未使用无人机</div>
+          <details class="section" open>
+            <summary class="title" title="两帧数量不同的无人机：多余的一方如何处理">未使用无人机</summary>
             <label class="field">
               <span>处理方式</span>
               <select v-model.number="form.params.unusedMode">
@@ -919,15 +919,15 @@ function close(): void {
                 <input v-model.number="form.params.parkDim" type="range" min="0" max="1" step="0.05" />
               </label>
             </template>
-          </div>
+          </details>
 
-          <div class="section">
-            <div
+          <details class="section" open>
+            <summary
               class="title"
               title="安全检测的硬约束：不满足这些限值就不能保存。可按机型/更严要求调整（0=用系统默认）"
             >
               安全限值（可配置 · 不通过不能保存）
-            </div>
+            </summary>
             <div class="row">
               <label class="field">
                 <span>最小间距（米）≥</span>
@@ -964,7 +964,7 @@ function close(): void {
                 <input v-model.number="form.params.limDownAccel" type="number" min="0" step="0.1" />
               </label>
             </div>
-          </div>
+          </details>
         </template>
       </div>
 
@@ -1205,6 +1205,25 @@ function close(): void {
   font-size: 12px;
   color: var(--accent);
   margin-bottom: 8px;
+}
+summary.title {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+summary.title::-webkit-details-marker {
+  display: none;
+}
+summary.title::before {
+  content: '▸';
+  color: var(--text-dim);
+  font-size: 10px;
+}
+details[open] > summary.title::before {
+  content: '▾';
 }
 .field {
   display: flex;
