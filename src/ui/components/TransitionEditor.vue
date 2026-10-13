@@ -739,16 +739,19 @@ function close(): void {
                 <option value="index">按索引</option>
               </select>
             </label>
-            <label class="field">
-              <span>距离权重 {{ form.params.wDist }}</span>
+            <div class="hint">
+              配对时会计算"总分 = 各权重 × 对应代价"之和，再据此择优；权重越大越偏向该项（0 = 不启用该项）。
+            </div>
+            <label class="field" title="“移动距离”在总分里的比重：越大越倾向就近配对、总路程更短">
+              <span>距离权重 {{ form.params.wDist }}（就近配对）</span>
               <input v-model.number="form.params.wDist" type="range" min="0" max="5" step="0.1" />
             </label>
-            <label class="field" title="得分的距离惩罚指数：p 越大越惩罚长距离（结果更均匀）">
-              <span>代价指数 p（dᵖ）{{ form.params.costPower }}</span>
+            <label class="field" title="距离的幂次：p 越大越严厉惩罚长距离（结果更均衡）">
+              <span>代价指数 p（dᵖ）{{ form.params.costPower }}（惩罚长距离）</span>
               <input v-model.number="form.params.costPower" type="range" min="1" max="4" step="0.25" />
             </label>
-            <label class="field">
-              <span>均匀度权重 {{ form.params.wEven }}</span>
+            <label class="field" title="让各架无人机的移动距离尽量相等（接近目标距离 d*）">
+              <span>均匀度权重 {{ form.params.wEven }}（距离尽量相等）</span>
               <input v-model.number="form.params.wEven" type="range" min="0" max="5" step="0.1" />
             </label>
             <div v-if="form.params.wEven > 0" class="subrow">
@@ -768,16 +771,16 @@ function close(): void {
                 </select>
               </label>
             </div>
-            <label class="field">
-              <span>方向一致权重 {{ form.params.wAngle }}</span>
+            <label class="field" title="让配对后的运动方向尽量一致，减少交叉">
+              <span>方向一致权重 {{ form.params.wAngle }}（少交叉）</span>
               <input v-model.number="form.params.wAngle" type="range" min="0" max="2" step="0.05" />
             </label>
-            <label class="field">
-              <span>同组保持权重 {{ form.params.wGroup }}</span>
+            <label class="field" title="同一分组的点尽量互相配对（保持分组不散）">
+              <span>同组保持权重 {{ form.params.wGroup }}（同组互配）</span>
               <input v-model.number="form.params.wGroup" type="range" min="0" max="2" step="0.1" />
             </label>
-            <label class="field">
-              <span>保持顺序权重 {{ form.params.wOrder }}</span>
+            <label class="field" title="沿某个轴的先后顺序尽量保持不变（避免整体错位）">
+              <span>保持顺序权重 {{ form.params.wOrder }}（先后不变）</span>
               <input v-model.number="form.params.wOrder" type="range" min="0" max="2" step="0.1" />
             </label>
             <label v-if="form.params.wOrder > 0" class="field" title="以哪个轴的坐标顺序作为“保持顺序”的排序依据">
@@ -788,12 +791,12 @@ function close(): void {
                 <option :value="2">Y</option>
               </select>
             </label>
-            <label class="field">
-              <span>保持半径权重 {{ form.params.wRadial }}</span>
+            <label class="field" title="尽量保持到中心（质心）的距离不变（保持环形/圆形结构）">
+              <span>保持半径权重 {{ form.params.wRadial }}（到中心距离不变）</span>
               <input v-model.number="form.params.wRadial" type="range" min="0" max="2" step="0.1" />
             </label>
-            <label class="field">
-              <span>保持极角权重 {{ form.params.wAngular }}</span>
+            <label class="field" title="尽量保持绕中心的角度不变（保持旋转排布不扭转）">
+              <span>保持极角权重 {{ form.params.wAngular }}（绕中心角度不变）</span>
               <input v-model.number="form.params.wAngular" type="range" min="0" max="2" step="0.05" />
             </label>
             <label class="field" title="每个点只在最近的 K 个候选里配对（0=全局最优，越大越慢越准）">
@@ -1266,7 +1269,9 @@ details:not([open]) > summary.title {
 }
 .hint {
   font-size: 12px;
+  line-height: 1.5;
   color: var(--text-dim);
+  margin-bottom: 6px;
 }
 .badge {
   display: inline-block;
