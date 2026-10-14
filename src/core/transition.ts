@@ -176,7 +176,15 @@ function bboxDiagonal(a: Point[], b: Point[]): number {
   let minY = Infinity
   let maxX = -Infinity
   let maxY = -Infinity
-  for (const p of a.concat(b)) {
+  for (let i = 0; i < a.length; i++) {
+    const p = a[i]
+    if (p.x < minX) minX = p.x
+    if (p.y < minY) minY = p.y
+    if (p.x > maxX) maxX = p.x
+    if (p.y > maxY) maxY = p.y
+  }
+  for (let i = 0; i < b.length; i++) {
+    const p = b[i]
     if (p.x < minX) minX = p.x
     if (p.y < minY) minY = p.y
     if (p.x > maxX) maxX = p.x
@@ -239,6 +247,9 @@ function allowedEdge(ctx: MatchCtx, i: number, j: number): boolean {
  *  - radial：|rA − rB| / 对角线
  *  - angular：Δθ / π
  */
+/** 复用同一数组，避免 O(n·m) 次小数组分配（调用方立即读取，不跨调用持有） */
+const edgePartsScratch: number[] = new Array(SCORE_TERMS).fill(0)
+
 function edgeScoreParts(ctx: MatchCtx, i: number, j: number): number[] {
   const ai = ctx.a[i]
   const bj = ctx.b[j]
@@ -271,7 +282,15 @@ function edgeScoreParts(ctx: MatchCtx, i: number, j: number): number[] {
     angularTerm = da / Math.PI
   }
 
-  return [distTerm, evenTerm, angleTerm, groupTerm, orderTerm, radialTerm, angularTerm]
+  const out = edgePartsScratch
+  out[0] = distTerm
+  out[1] = evenTerm
+  out[2] = angleTerm
+  out[3] = groupTerm
+  out[4] = orderTerm
+  out[5] = radialTerm
+  out[6] = angularTerm
+  return out
 }
 
 /** 加权总得分（禁止边返回 BIG） */

@@ -1,6 +1,14 @@
 import { describe, expect, it } from 'vitest'
 import { buildRender, planAvoidance, sampleRenderSegment } from '../src/core/transition'
-import { SAFETY_LIMITS, minDurationForLimits, shortestDurationForLimits, safetyCheck } from '../src/core/safety'
+import {
+  SAFETY_LIMITS,
+  mergeSafety,
+  minDurationForLimits,
+  safetyCheck,
+  safetyCheckRange,
+  safetySteps,
+  shortestDurationForLimits,
+} from '../src/core/safety'
 import type { Point, Transition } from '../src/core/types'
 
 function pt(id: string, x: number, y: number, f = 'f1'): Point {
@@ -94,6 +102,37 @@ describe('安全检测', () => {
       }
     }
     expect(worst).toBeGreaterThan(1.2)
+  })
+
+  it('分块并行安全检测与单次全量逐位一致（多种块数）', () => {
+    const a: Point[] = []
+    const b: Point[] = []
+    const pairs: [number, number][] = []
+    for (let k = 0; k < 8; k++) {
+      a.push(pt(`a${k}`, (k % 4) * 3, Math.floor(k / 4) * 3))
+      b.push(pt(`b${k}`, 12 - (k % 4) * 3, Math.floor(k / 4) * 3, 'f2'))
+      pairs.push([k, k])
+    }
+    const t = tr({ duration: 1.5 })
+    const avoid = planAvoidance(a, b, pairs, t, SAFETY_LIMITS.minSeparation)
+    const render = buildRender(a, b, t, { pairs, exiting: [], entering: [], elapsedMs: 0, avoid })
+    const single = safetyCheck(render, SAFETY_LIMITS, 30)
+    const steps = safetySteps(render, 30)
+    const frames = steps + 1
+    for (const K of [1, 2, 3, 4, 7, 16, 64]) {
+      const parts = []
+      for (let c = 0; c < K; c++) {
+        const lo = Math.floor((c * frames) / K)
+        const hi = Math.floor(((c + 1) * frames) / K) - 1
+        if (hi < lo) continue
+        parts.push(safetyCheckRange(render, SAFETY_LIMITS, 30, lo, hi))
+      }
+      const merged = mergeSafety(parts, SAFETY_LIMITS, steps)
+      expect(merged.metrics).toEqual(single.metrics)
+      expect(merged.pass).toBe(single.pass)
+      expect(merged.failures).toEqual(single.failures)
+      expect(merged.frames).toBe(single.frames)
+    }
   })
 })
 

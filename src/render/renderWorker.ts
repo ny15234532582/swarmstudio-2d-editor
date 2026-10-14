@@ -5,7 +5,12 @@
  * 都放这里，避免主线程卡顿。
  */
 import { planAvoidance, planTransition, type RenderAssignment } from '../core/transition'
-import { safetyCheck, type SafetyLimits, type SafetyResult } from '../core/safety'
+import {
+  safetyCheck,
+  safetyCheckRange,
+  type SafetyLimits,
+  type SafetyResult,
+} from '../core/safety'
 import type { Point, Transition } from '../core/types'
 import type { RenderPayload } from '../core/transition'
 
@@ -32,11 +37,26 @@ interface SafetyRequest {
   limits: SafetyLimits
   fps: number
 }
-type Req = PlanRequest | SafetyRequest
+/** 安全检测分块：只算采样帧区间 [lo, hi]（含两端），归约由主线程完成 */
+interface SafetyPartRequest {
+  id: number
+  kind: 'safetyPart'
+  render: RenderPayload
+  limits: SafetyLimits
+  fps: number
+  lo: number
+  hi: number
+}
+type Req = PlanRequest | SafetyRequest | SafetyPartRequest
 
 scope.onmessage = (event: MessageEvent) => {
   const req = event.data as Req
   try {
+    if (req.kind === 'safetyPart') {
+      const result: SafetyLimits = safetyCheckRange(req.render, req.limits, req.fps, req.lo, req.hi)
+      scope.postMessage({ id: req.id, ok: true, result })
+      return
+    }
     if (req.kind === 'safety') {
       const result: SafetyResult = safetyCheck(req.render, req.limits, req.fps)
       scope.postMessage({ id: req.id, ok: true, result })
