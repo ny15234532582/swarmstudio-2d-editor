@@ -33,14 +33,14 @@ function cacheSet<K, V>(map: Map<K, V>, key: K, value: V): void {
   map.set(key, value)
 }
 
-/** worker 数：留 1 核给主线程，最多 4 个；核太少则退回单 worker */
+/** worker 数：留 1 核给主线程；上限 8（再多收益递减、还会和主线程抢核）；核太少退回单 worker */
 function workerCount(): number {
   const hc =
     typeof navigator !== 'undefined' && navigator.hardwareConcurrency
       ? navigator.hardwareConcurrency
       : 4
   if (hc <= 2) return 1
-  return Math.min(4, hc - 1)
+  return Math.min(8, hc - 1)
 }
 
 export class RenderClient {

@@ -307,6 +307,8 @@ Operation 契约、任务队列、SQLite 表结构与迁移、渲染方案）均
 
 - **Markdown（源）**：[`docs/design.md`](docs/design.md)
 - **Word（交付）**：[`docs/design.docx`](docs/design.docx)
+- **过渡计算流水线（匹配 / 避让 / 安全 · 并发与缓存）**：
+  [`docs/render-pipeline.md`](docs/render-pipeline.md)
 
 Word 版由 `bash scripts/md-to-docx.sh` 从 Markdown 生成（`marked` + LibreOffice，
 不需要额外安装依赖），二者内容一致。
